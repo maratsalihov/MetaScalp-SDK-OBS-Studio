@@ -319,6 +319,8 @@ class TradingRecorder:
             "realizedPnl": realized_pnl
         }
         
+        logger.info(f"Position: {ticker} {side} size={size} pnl={realized_pnl}")
+        
         # Get state before processing
         session_before = self.position_tracker.get_active_session()
         was_recording = session_before.is_recording if session_before else False
@@ -331,6 +333,7 @@ class TradingRecorder:
         
         # Detect: New position opened -> Start recording
         if session_after and not was_recording and session_after.ticker == ticker:
+            logger.info(f"Новая позиция {ticker} - запускаю запись")
             self._start_recording_flow(ticker, session_after.side)
         
         # Detect: Position fully closed -> Stop recording
