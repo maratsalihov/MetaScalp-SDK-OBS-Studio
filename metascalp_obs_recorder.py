@@ -363,24 +363,25 @@ class TradingRecorder:
         is_rec = self.obs_controller.is_recording()
         logger.info(f"Current OBS recording status before stop: {is_rec}")
         
-        if self.obs_controller.stop_recording():
+        success = self.obs_controller.stop_recording()
+        
+        if success:
             logger.info("✅ Stop recording command sent successfully")
-            
-            # Ждем финализации файла
-            logger.info("Waiting 2 seconds for file finalization...")
-            time.sleep(2)
-            
-            # Проверяем, что запись действительно остановилась
-            is_rec_after = self.obs_controller.is_recording()
-            logger.info(f"Current OBS recording status after stop: {is_rec_after}")
-            
-            # Rename the recorded file
-            self._rename_last_recording(ticker, side, pnl)
-            
-            # Callback removed
-                
         else:
-            logger.error("Failed to stop recording")
+            logger.error("❌ Failed to stop recording, retrying in 1s...")
+            time.sleep(1)
+            self.obs_controller.stop_recording()
+        
+        # Ждем финализации файла
+        logger.info("Waiting 2 seconds for file finalization...")
+        time.sleep(2)
+        
+        # Проверяем, что запись действительно остановилась
+        is_rec_after = self.obs_controller.is_recording()
+        logger.info(f"Current OBS recording status after stop: {is_rec_after}")
+        
+        # Rename the recorded file
+        self._rename_last_recording(ticker, side, pnl)
     
     def _rename_last_recording(self, ticker: str, side: str, pnl: float):
         """Find and rename the most recent recording file."""
@@ -783,6 +784,9 @@ if __name__ == "__main__":
     import asyncio
     from metascalp import MetaScalpClient, MetaScalpSocket
     
+    import logging
+    logging.getLogger("metascalp").setLevel(logging.WARNING)
+    
     # Инициализируем рекордер
     recorder = TradingRecorder()
     
@@ -791,14 +795,23 @@ if __name__ == "__main__":
     logger.info("=" * 60)
     logger.info(f"OBS Host: {recorder.obs_host}:{recorder.obs_port}")
     logger.info(f"Video Path: {recorder.obs_video_path or '(auto-detect)'}")
-    logger.info(f"Filename Template: {recorder.filename_template}")
     logger.info("=" * 60)
     
+    # Подключаемся к OBS и останавливаем висячую запись
     logger.info("Testing OBS connection...")
     if recorder.obs_controller.connect():
         logger.info("OBS connection successful!")
+        
+        # Проверяем и останавливаем висячую запись
+        is_rec = recorder.obs_controller.is_recording()
+        logger.info(f"Current recording status: {'ACTIVE' if is_rec else 'INACTIVE'}")
+        
+        if is_rec:
+            logger.warning("⚠️ Active recording detected! Stopping previous recording...")
+            recorder.obs_controller.stop_recording()
+            time.sleep(2)
     else:
-        logger.warning("Could not connect to OBS. Ensure OBS is running with WebSocket enabled.")
+        logger.warning("Could not connect to OBS.")
     
     async def run_with_metascalp():
         """Запускаем с MetaScalp SDK"""
@@ -835,12 +848,41 @@ if __name__ == "__main__":
             socket.subscribe(conn_id)
             logger.info(f"Subscribed to position updates for {conn_name}")
         
+        # REST watchdog для проверки позиций
+        async def rest_watchdog():
+            while True:
+                await asyncio.sleep(2)
+                try:
+                    if client:
+                        for conn in active_connections:
+                            pos_data = await client.get_positions(conn["Id"])
+                            positions = pos_data.get("positions", [])
+                            if not positions and recorder._recording_active:
+                                logger.warning("⚠️ REST watchdog: no positions but recording active! Stopping...")
+                                recorder._recording_active = False
+                                recorder._stop_recording_flow("unknown", "unknown", 0)
+                except Exception as e:
+                    logger.debug(f"REST watchdog error: {e}")
+        
         @socket.on("position_update")
         def on_position(data):
+            # ЛОГИРОВАНИЕ СЫРЫХ ДАННЫХ
+            logger.info(f"RAW EVENT: {data}")
+            
             ticker = data.get("ticker", "")
             size = float(data.get("size", 0))
             side = data.get("side", "Buy")
             realized_pnl = float(data.get("realizedPnl", 0) or 0)
+            
+            # Нормализуем размер
+            if size < 0:
+                side = "Short"
+                size = abs(size)
+            
+            # Проверяем status
+            status = data.get("status", "")
+            if status and status.lower() in ("closed", "close"):
+                size = 0.0
             
             logger.info(f"Position: {ticker} {side} size={size} pnl={realized_pnl}")
             recorder.handle_position_event(ticker, size, side, realized_pnl)
@@ -848,7 +890,15 @@ if __name__ == "__main__":
         logger.info("Listening for position updates...")
         logger.info("Press Ctrl+C to stop")
         
-        await socket.listen_forever()
+        # Запускаем watchdog параллельно
+        watchdog = asyncio.create_task(rest_watchdog())
+        
+        try:
+            await socket.listen_forever()
+        finally:
+            watchdog.cancel()
+        
+        await client.close()
     
     try:
         asyncio.run(run_with_metascalp())
@@ -856,47 +906,6 @@ if __name__ == "__main__":
         logger.info("\nShutdown requested by user")
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
-    finally:
-        if recorder.obs_controller.connected:
-            try:
-                recorder.obs_controller.client.disconnect()
-            except Exception:
-                pass
-        logger.info("Application terminated")
-    
-    # Log configuration
-    logger.info("=" * 60)
-    logger.info("MetaScalp + OBS Recording Automation")
-    logger.info("=" * 60)
-    logger.info(f"OBS Host: {recorder.obs_host}:{recorder.obs_port}")
-    logger.info(f"Video Path: {recorder.obs_video_path or '(auto-detect)'}")
-    logger.info(f"Filename Template: {recorder.filename_template}")
-    logger.info("=" * 60)
-    
-    # Test OBS connection
-    logger.info("Testing OBS connection...")
-    if recorder.obs_controller.connect():
-        logger.info("OBS connection successful!")
-        
-        # Check current recording status
-        is_rec = recorder.obs_controller.is_recording()
-        logger.info(f"Current recording status: {'ACTIVE' if is_rec else 'INACTIVE'}")
-    else:
-        logger.warning("Could not connect to OBS. Ensure OBS is running with WebSocket enabled.")
-        logger.warning("The script will continue and retry connections as needed.")
-    
-    logger.info("")
-    logger.info("Starting event processing...")
-    logger.info("Press Ctrl+C to stop")
-    logger.info("")
-    
-    try:
-        asyncio.run(run_with_metascalp())
-        
-    except KeyboardInterrupt:
-        logger.info("\nShutdown requested by user")
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}", exc_info=True)
     finally:
         # Принудительная остановка записи при выходе
         if recorder._recording_active:
