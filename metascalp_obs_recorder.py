@@ -20,7 +20,14 @@ from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 from obswebsocket import obsws, requests
-from metascalp import MetaScalpClient, MetaScalpSocket
+
+try:
+    from metascalp import MetaScalpClient, MetaScalpSocket
+    METASCALP_AVAILABLE = True
+except ImportError:
+    METASCALP_AVAILABLE = False
+    MetaScalpClient = None
+    MetaScalpSocket = None
 
 # Load environment variables
 load_dotenv()
@@ -753,6 +760,11 @@ async def run_with_metascalp_sdk():
 
 
 if __name__ == "__main__":
+    if not METASCALP_AVAILABLE:
+        print("WARNING: metascalp module not installed. Running in DEMO mode only.")
+        print("To use real MetaScalp SDK, install: pip install metascalp")
+        print()
+    
     # Initialize the recorder
     recorder = TradingRecorder()
     
