@@ -197,20 +197,19 @@ class OBSController:
             # Identify
             ws.send(json.dumps({'op': 1, 'd': {'rpcVersion': 1, 'authentication': auth_str}}))
             
-            # Сначала получим путь записи
+            # Получим статус записи
             ws.send(json.dumps({'op': 6, 'd': {'requestType': 'GetRecordStatus', 'requestId': '1'}}))
             
             import time
-            time.sleep(0.3)
+            time.sleep(0.5)
             try:
                 response = ws.recv()
                 if response:
                     data = json.loads(response)
-                    output = data.get('d', {}).get('responseData', {})
-                    output_path = output.get('outputPath', '')
-                    logger.info(f"OBS will save to: {output_path}")
-            except:
-                pass
+                    record_data = data.get('d', {}).get('responseData', {})
+                    logger.info(f"Record status: {record_data}")
+            except Exception as e:
+                logger.info(f"No record status response: {e}")
             
             # StartRecord
             ws.send(json.dumps({'op': 6, 'd': {'requestType': 'StartRecord', 'requestId': '2'}}))
