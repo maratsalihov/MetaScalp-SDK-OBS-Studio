@@ -521,10 +521,19 @@ def create_metascalp_event_handler(recorder: TradingRecorder):
             'realized_pnl': float  # Realized PnL (optional, default 0)
         }
         """
+        # ЛОГИРОВАНИЕ СЫРЫХ ДАННЫХ
+        logger.info(f"RAW EVENT: {event_data}")
+        
         ticker = event_data.get('ticker', '')
         size = float(event_data.get('size', 0))
         side = event_data.get('side', '')
         realized_pnl = float(event_data.get('realized_pnl', 0))
+        
+        # Проверяем status
+        status = event_data.get('status', '')
+        if status and status.lower() in ('closed', 'close'):
+            logger.info(f"Status indicates closed: {status}, setting size=0")
+            size = 0.0
         
         recorder.handle_position_event(ticker, size, side, realized_pnl)
     
@@ -665,6 +674,9 @@ class MetaScalpSDKIntegration:
             logger.info("Listening for position updates from MetaScalp SDK...")
             logger.info("Press Ctrl+C to stop")
             
+            # Start REST watchdog in background
+            watchdog_task = asyncio.create_task(self._rest_position_watchdog())
+            
             try:
                 # Start listening for WebSocket messages
                 await self.socket.listen_forever()
@@ -672,6 +684,7 @@ class MetaScalpSDKIntegration:
                 logger.error(f"WebSocket error: {e}")
             finally:
                 self._running = False
+                watchdog_task.cancel()
             
             if not self._running:
                 break
@@ -679,6 +692,23 @@ class MetaScalpSDKIntegration:
             # Reconnect after disconnection
             logger.info("Connection lost. Reconnecting in 5s...")
             await asyncio.sleep(5)
+    
+    async def _rest_position_watchdog(self):
+        """Fallback: проверка позиций через REST каждую секунду"""
+        while self._running:
+            await asyncio.sleep(2)
+            try:
+                if self.client and self.connection_id:
+                    positions = await self.client.get_positions(self.connection_id)
+                    position_list = positions.get("positions", [])
+                    has_any_position = len(position_list) > 0
+                    
+                    if not has_any_position and self.recorder._recording_active:
+                        logger.warning("⚠️ REST watchdog: no positions but recording active! Forcing stop...")
+                        self.recorder._recording_active = False
+                        self.recorder._stop_recording_flow("unknown", "unknown", 0)
+            except Exception as e:
+                logger.debug(f"REST check failed: {e}")
     
     async def close(self):
         """Clean up resources."""
