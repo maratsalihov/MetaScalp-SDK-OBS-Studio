@@ -1,3 +1,8 @@
-.local/
-*.bat
-*.tmp
+```
+# Compiled Python files
+*.pyc
+__pycache__/
+
+# Environment files
+.env
+```
