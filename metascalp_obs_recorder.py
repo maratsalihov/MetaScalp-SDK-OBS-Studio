@@ -10,6 +10,7 @@ REST endpoint: http://127.0.0.1:17845/
 """
 
 import os
+import json
 import time
 import logging
 import asyncio
@@ -276,16 +277,28 @@ class TradingRecorder:
     Main controller that integrates MetaScalp tracking with OBS recording.
     """
     
-    def __init__(self):
-        # Configuration from environment
-        self.obs_host = os.getenv("OBS_HOST", "localhost")
-        self.obs_port = int(os.getenv("OBS_PORT", "4455"))
-        self.obs_password = os.getenv("OBS_PASSWORD", "")
-        self.obs_video_path = os.getenv("OBS_VIDEO_PATH", "")
-        self.filename_template = os.getenv(
-            "FILENAME_TEMPLATE",
-            "[{date}_{time}] {ticker}_{side}_PnL_{pnl}.mp4"
-        )
+    def __init__(self, config_path="config.json"):
+        # Try to load from config.json first
+        try:
+            with open(config_path, encoding="utf-8") as f:
+                config = json.load(f)
+            self.obs_host = config.get("obs", {}).get("host", "127.0.0.1")
+            self.obs_port = config.get("obs", {}).get("port", 4455)
+            self.obs_password = config.get("obs", {}).get("password", "")
+            self.obs_video_path = config.get("obs", {}).get("video_path", "e:\\video")
+            self.exchange_ids = config.get("exchange_ids", [])
+            self.filename_template = config.get("filename_template", "[{date}_{time}] {tickers}.mp4")
+        except FileNotFoundError:
+            # Fallback to environment
+            self.obs_host = os.getenv("OBS_HOST", "localhost")
+            self.obs_port = int(os.getenv("OBS_PORT", "4455"))
+            self.obs_password = os.getenv("OBS_PASSWORD", "")
+            self.obs_video_path = os.getenv("OBS_VIDEO_PATH", "")
+            self.filename_template = os.getenv(
+                "FILENAME_TEMPLATE",
+                "[{date}_{time}] {tickers}.mp4"
+            )
+            self.exchange_ids = []
         
         # Recording state - track manually
         self._recording_active = False
