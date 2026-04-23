@@ -290,6 +290,8 @@ class TradingRecorder:
         # Recording state - track manually
         self._recording_active = False
         self._last_ticker = ""
+        self._last_side = ""
+        self._last_size = {}  # Track size per ticker
         
         # Initialize components
         self.obs_controller = OBSController(
@@ -325,22 +327,33 @@ class TradingRecorder:
         
         logger.info(f"Position: {ticker} {side} size={size} pnl={realized_pnl}")
         
-        # Check if position opened (size > 0 and wasn't recording)
-        position_opened = size != 0 and not self._recording_active
+        # Track previous size
+        prev_size = self._last_size.get(ticker, 0)
+        
+        # Determine position state
+        # Buy/LONG = positive size, Sell = negative size
+        position_opened = prev_size == 0 and size != 0 and not self._recording_active
         position_closed = self._recording_active and size == 0
         
         # Start recording on position open
         if position_opened:
             logger.info(f"Позиция открыта {ticker} - запускаю запись")
             self._last_ticker = ticker
+            self._last_side = side
             self._recording_active = True
+            self._last_size[ticker] = size
             self._start_recording_flow(ticker, side)
         
         # Stop recording on position close
         elif position_closed:
             logger.info(f"Позиция закрыта {ticker} - останавливаю запись")
             self._recording_active = False
+            self._last_size[ticker] = 0
             self._stop_recording_flow(ticker, side, realized_pnl)
+        
+        # Update size tracking
+        elif size != 0:
+            self._last_size[ticker] = size
     
     def _start_recording_flow(self, ticker: str, side: str):
         """Execute the recording start flow."""
