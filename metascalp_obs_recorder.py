@@ -862,17 +862,7 @@ if __name__ == "__main__":
     logger.info("")
     
     try:
-        # Run demo mode (replace with actual SDK integration in production)
-        recorder.run_demo_loop(duration=30)
-        
-        # For production use with real MetaScalp SDK, replace the above with:
-        # 
-        # from metascalp_sdk import MetaScalpClient  # hypothetical import
-        # 
-        # client = MetaScalpClient(api_key=..., secret=...)
-        # handler = create_metascalp_event_handler(recorder)
-        # client.subscribe_position_updates(handler)
-        # client.run()  # or appropriate method to start event loop
+        asyncio.run(run_with_metascalp())
         
     except KeyboardInterrupt:
         logger.info("\nShutdown requested by user")
