@@ -403,7 +403,7 @@ class TradingRecorder:
         # Rename the recorded file
         self._rename_last_recording(ticker, side, pnl)
     
-    def _rename_last_recording(self, ticker: str, side: str, pnl: float):
+    def _rename_last_recording(self, tickers: str, side: str, pnl: float):
         """Find and rename the most recent recording file."""
         # Get video directory
         video_dir = self.obs_video_path
@@ -416,7 +416,7 @@ class TradingRecorder:
         
         video_path = Path(video_dir)
         if not video_path.exists():
-            logger.error(f"Video directory does not exist: {video_path}")
+            logger.error(f"Video directory does not exist: {video_dir}")
             return
         
         # Find the most recent .mp4 or .mkv file
@@ -431,14 +431,15 @@ class TradingRecorder:
         # Sort by modification time and get the latest
         latest_file = max(video_files, key=lambda f: f.stat().st_mtime)
         
-        # Generate new filename
+        # Generate new filename using tickers (side and pnl removed as agreed)
         now = datetime.now()
         new_name = self.filename_template.format(
             date=now.strftime("%Y-%m-%d"),
             time=now.strftime("%H-%M"),
-            ticker=ticker,
-            side=side,
-            pnl=self._format_pnl(pnl)
+            tickers=tickers,
+            ticker=tickers,
+            side="",
+            pnl=""
         )
         
         new_path = video_path / new_name
