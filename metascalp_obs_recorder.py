@@ -304,6 +304,7 @@ class TradingRecorder:
 # Track which tickers are currently being recorded
         self._recording_tickers: set = set()
         self._accumulated_pnl = {}  # Накопленный PnL для каждого тикера
+        self._pending_close_pnl = None  # (ticker, connection_id) для закрытия с REST
     
     def handle_position_event(self, ticker: str, size: float, side: str, realized_pnl: float = 0.0):
         """
@@ -865,11 +866,29 @@ if __name__ == "__main__":
             socket.subscribe(conn_id)
             logger.info(f"Subscribed to position updates for {conn_name}")
         
-        # REST watchdog для проверки позиций
+        # REST watchdog для проверки позиций и получения PnL при закрытии
         async def rest_watchdog():
             while True:
-                await asyncio.sleep(2)
+                await asyncio.sleep(1)
                 try:
+                    # Проверяем есть ли ожидающий закрытие с REST
+                    if recorder._pending_close_pnl and client:
+                        ticker, connection_id = recorder._pending_close_pnl
+                        if connection_id:
+                            try:
+                                finres = await client.get_finres(connection_id)
+                                for item in finres.get("finreses", []):
+                                    if item.get("currency") == "USDT":
+                                        pnl = item.get("result", 0.0)
+                                        logger.info(f"📊 PnL from REST for {ticker}: {pnl}")
+                                        # Обновляем PnL
+                                        recorder._accumulated_pnl[ticker] = pnl
+                                        recorder._pending_close_pnl = None
+                                        break
+                            except Exception as e:
+                                logger.warning(f"Failed to fetch PnL: {e}")
+                    
+                    # Проверяем позиции
                     if client:
                         for conn in active_connections:
                             pos_data = await client.get_positions(conn["Id"])
@@ -882,7 +901,7 @@ if __name__ == "__main__":
                     logger.debug(f"REST watchdog error: {e}")
         
         @socket.on("position_update")
-        async def on_position(data):
+        def on_position(data):
             # ЛОГИРОВАНИЕ СЫРЫХ ДАННЫХ
             logger.info(f"RAW EVENT: {data}")
             
@@ -891,32 +910,24 @@ if __name__ == "__main__":
             side = data.get("side", "Buy")
             realized_pnl = float(data.get("realizedPnl", 0) or 0)
             connection_id = data.get("connectionId", 0)
+            status = data.get("status", "")
+            
+            # При закрытии позиции - получаем PnL через REST (синхронно нельзя, запоминаем)
+            if status and status.lower() in ("closed", "close"):
+                size = 0.0
+                recorder._pending_close_pnl = (ticker, connection_id)
+            else:
+                recorder._pending_close_pnl = None
             
             # Нормализуем размер
             if size < 0:
                 side = "Short"
                 size = abs(size)
             
-            # Проверяем status
-            status = data.get("status", "")
-            
-            # При закрытии позиции - получаем PnL через REST
-            if status and status.lower() in ("closed", "close"):
-                size = 0.0
-                # Пробуем получить PnL через REST
-                if connection_id and client:
-                    try:
-                        finres = await client.get_finres(connection_id)
-                        for item in finres.get("finreses", []):
-                            if item.get("currency") == "USDT":
-                                realized_pnl = item.get("result", 0.0)
-                                logger.info(f"📊 PnL from REST for {ticker}: {realized_pnl}")
-                                break
-                    except Exception as e:
-                        logger.warning(f"Failed to fetch PnL: {e}")
-            
             logger.info(f"Position: {ticker} {side} size={size} pnl={realized_pnl}")
             recorder.handle_position_event(ticker, size, side, realized_pnl)
+        
+        socket.on("position_update", on_position)
         
         logger.info("Listening for position updates...")
         logger.info("Press Ctrl+C to stop")
