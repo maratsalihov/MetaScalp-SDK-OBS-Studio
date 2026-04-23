@@ -79,221 +79,73 @@ class TradeSession:
 
 
 class OBSController:
-    """Controls OBS Studio via WebSocket connection."""
+    """Controls OBS Studio via obswebsocket library."""
     
     def __init__(self, host: str, port: int, password: str):
         self.host = host
         self.port = port
-        self.password = password
-        self.ws = None
+        self.password = password or ""
+        self.client = None
         self.connected = False
     
-    def _build_auth(self, salt: str, challenge: str) -> str:
-        """Build authentication string for OBS WebSocket v5."""
-        import hashlib
-        import hmac
-        import base64
-        secret = hashlib.pbkdf2_hmac('sha256', self.password.encode(), base64.b64decode(salt), 60000)
-        auth = hmac.new(base64.b64decode(challenge), secret, hashlib.sha256).digest()
-        return base64.b64encode(auth).decode()
-    
     def connect(self) -> bool:
-        """Подключаемся к OBS - каждый раз новое соединение для каждой команды"""
         try:
-            import websocket
-            import json
-            import hashlib
-            import hmac
-            import base64
-            
-            # Новое подключение для каждой команды
-            ws = websocket.WebSocket(skip_utf8_validation=True)
-            ws.settimeout(5)
-            url = f"ws://{self.host}:{self.port}"
-            ws.connect(url)
-            
-            # Hello
-            hello = json.loads(ws.recv())
-            obs_version = hello['d'].get('obsStudioVersion', 'unknown')
-            
-            # Auth - не используем пароль для локального подключения
-            auth_str = None
-            
-            # Identify
-            ws.send(json.dumps({
-                "op": 1,
-                "d": {"rpcVersion": 1, "authentication": auth_str}
-            }))
-            
-            # Сохраняем соединение
-            self.ws = ws
+            from obswebsocket import obsws
+            self.client = obsws(self.host, self.port, self.password)
+            self.client.connect()
             self.connected = True
-            logger.info(f"Connected to OBS {obs_version}")
+            logger.info(f"Подключено к OBS {self.host}:{self.port}")
             return True
-            
         except Exception as e:
             self.connected = False
-            logger.error(f"OBS connection failed: {e}")
+            logger.error(f"Не подключиться к OBS: {e}")
             return False
     
     def ensure_connected(self) -> bool:
-        """Для каждой операции создаем НОВОЕ подключение"""
-        if self.connected and self.ws:
-            try:
-                # Просто тестируем - пингуем
-                return True
-            except:
-                pass
+        if self.connected and self.client:
+            return True
         return self.connect()
     
     def is_recording(self) -> bool:
-        """Check if OBS is currently recording."""
         if not self.ensure_connected():
             return False
-        
         try:
-            import json
-            self.ws.send(json.dumps({
-                "op": 6,
-                "d": {"requestType": "GetRecordStatus", "requestId": "1"}
-            }))
-            # Ждём ответ (op:7)
-            import time
-            time.sleep(0.3)
-            response = self.ws.recv()
-            if response:
-                data = json.loads(response)
-                record_status = data.get('d', {}).get('responseData', {}).get('outputActive', False)
-                logger.info(f"Record status: {record_status}")
-                return record_status
+            from obswebsocket import requests
+            status = self.client.call(requests.GetRecordStatus())
+            return status.getOutputActive()
         except Exception as e:
-            logger.error(f"Error checking record status: {e}")
+            logger.error(f"Ошибка проверки статуса: {e}")
             self.connected = False
-        return False
+            return False
     
     def start_recording(self) -> bool:
-        """Start recording in OBS."""
-        try:
-            import websocket
-            import json
-            import hashlib
-            import hmac
-            import base64
-            
-            # Новое подключение
-            ws = websocket.WebSocket(skip_utf8_validation=True)
-            ws.settimeout(5)
-            ws.connect(f"ws://{self.host}:{self.port}")
-            
-            # Hello
-            hello = json.loads(ws.recv())
-            
-            # Auth - не используем пароль для локального подключения
-            auth_str = None
-            
-            # Identify
-            ws.send(json.dumps({'op': 1, 'd': {'rpcVersion': 1, 'authentication': auth_str}}))
-            
-            # Ждём Identified (op:2)
-            identified = ws.recv()
-            if identified:
-                ident_data = json.loads(identified)
-                logger.info(f"Identified: {ident_data}")
-                if ident_data.get('op') == 2:
-                    if not ident_data.get('d', {}).get('requestStatus', {}).get('result', False):
-                        logger.error("Identify failed")
-                        ws.close()
-                        return False
-            
-            # StartRecord
-            ws.send(json.dumps({'op': 6, 'd': {'requestType': 'StartRecord', 'requestId': '2'}}))
-            
-            # Ждём ответ (op:7)
-            response = ws.recv()
-            if response:
-                resp_data = json.loads(response)
-                logger.info(f"StartRecord response: {resp_data}")
-                result = resp_data.get('d', {}).get('requestStatus', {}).get('result', False)
-                if result:
-                    logger.info("Recording started")
-                    ws.close()
-                    return True
-                else:
-                    logger.error(f"StartRecord failed: {resp_data}")
-                    ws.close()
-                    return False
-            
-            ws.close()
+        if not self.ensure_connected():
             return False
+        try:
+            from obswebsocket import requests
+            self.client.call(requests.StartRecord())
+            logger.info("Запись началась!")
+            return True
         except Exception as e:
-            logger.error(f"Failed to start recording: {e}")
+            logger.error(f"Ошибка старта записи: {e}")
             return False
     
     def stop_recording(self) -> bool:
-        """Stop recording in OBS."""
-        try:
-            import websocket
-            import json
-            import hashlib
-            import hmac
-            import base64
-            
-            # Новое подключение
-            ws = websocket.WebSocket(skip_utf8_validation=True)
-            ws.settimeout(5)
-            ws.connect(f"ws://{self.host}:{self.port}")
-            
-            # Hello
-            hello = json.loads(ws.recv())
-            
-            # Auth - не используем пароль для локального подключения
-            auth_str = None
-            
-            # Identify
-            ws.send(json.dumps({'op': 1, 'd': {'rpcVersion': 1, 'authentication': auth_str}}))
-            
-            # Ждём Identified (op:2)
-            identified = ws.recv()
-            if identified:
-                ident_data = json.loads(identified)
-                logger.info(f"Identified: {ident_data}")
-                if ident_data.get('op') == 2:
-                    if not ident_data.get('d', {}).get('requestStatus', {}).get('result', False):
-                        logger.error("Identify failed")
-                        ws.close()
-                        return False
-            
-            # StopRecord
-            ws.send(json.dumps({'op': 6, 'd': {'requestType': 'StopRecord', 'requestId': '2'}}))
-            
-            # Ждём ответ (op:7)
-            response = ws.recv()
-            if response:
-                resp_data = json.loads(response)
-                logger.info(f"StopRecord response: {resp_data}")
-                result = resp_data.get('d', {}).get('requestStatus', {}).get('result', False)
-                if result:
-                    logger.info("Recording stopped")
-                    ws.close()
-                    return True
-                else:
-                    logger.error(f"StopRecord failed: {resp_data}")
-                    ws.close()
-                    return False
-            
-            ws.close()
+        if not self.ensure_connected():
             return False
+        try:
+            from obswebsocket import requests
+            self.client.call(requests.StopRecord())
+            logger.info("Запись остановлена!")
+            return True
         except Exception as e:
-            logger.error(f"Failed to stop recording: {e}")
+            logger.error(f"Ошибка стопа записи: {e}")
             return False
     
     def get_output_directory(self) -> Optional[str]:
-        """Get the directory where OBS saves recordings."""
-        # Fallback to environment variable or common paths
         video_path = os.getenv("OBS_VIDEO_PATH", "")
         if video_path and Path(video_path).exists():
             return video_path
-        
         default_paths = [
             Path.home() / "Videos",
             Path.home() / "Desktop",
@@ -301,7 +153,6 @@ class OBSController:
         for p in default_paths:
             if p.exists():
                 return str(p)
-        
         return None
 
 
@@ -871,7 +722,7 @@ async def run_with_metascalp_sdk():
         # Cleanup OBS
         if recorder.obs_controller.connected:
             try:
-                recorder.obs_controller.ws.disconnect()
+                recorder.obs_controller.client.disconnect()
             except Exception:
                 pass
         
@@ -956,13 +807,12 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
     finally:
-        if recorder.obs_controller.ws:
+        if recorder.obs_controller.connected:
             try:
-                recorder.obs_controller.ws.close()
+                recorder.obs_controller.client.disconnect()
             except Exception:
                 pass
         logger.info("Application terminated")
-    recorder = TradingRecorder()
     
     # Log configuration
     logger.info("=" * 60)
@@ -1009,9 +859,9 @@ if __name__ == "__main__":
         logger.error(f"Unexpected error: {e}", exc_info=True)
     finally:
         # Cleanup
-        if recorder.obs_controller.ws:
+        if recorder.obs_controller.connected:
             try:
-                recorder.obs_controller.ws.close()
+                recorder.obs_controller.client.disconnect()
             except Exception:
                 pass
         logger.info("Application terminated")
