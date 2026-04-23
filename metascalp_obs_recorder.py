@@ -299,15 +299,9 @@ class TradingRecorder:
             self.obs_port, 
             self.obs_password
         )
-        self.position_tracker = MetaScalpPositionTracker()
-        
-# Track which tickers are currently being recorded
-        self._recording_tickers: set = set()
+        # Simplified tracking - no position tracker needed
         self._active_tickers = set()   # открытые сейчас
         self._session_tickers = set()  # все тикеры за сессию
-        self._pending_start_finres = None  # (ticker, connection_id) при открытии
-        self._pending_close_pnl = None  # (ticker, connection_id) для закрытия с REST
-        self._start_finres = {}  # ticker -> finres Result при открытии
     
     def handle_position_event(self, ticker: str, size: float, side: str, realized_pnl: float = 0.0):
         """
@@ -367,18 +361,12 @@ class TradingRecorder:
         logger.info(f"Starting recording for {ticker} {side}")
         
         if self.obs_controller.start_recording():
-            session = self.position_tracker.get_active_session()
-            if session:
-                session.is_recording = True
-            # Callback removed
-                
+            pass
         else:
             logger.error("Failed to start recording - will retry on next event")
     
     def _stop_recording_flow(self, ticker: str, side: str, pnl: float):
         """Execute the recording stop and file rename flow."""
-        logger.info(f"🛑 STOPPING recording for {ticker} {side}, PnL: {pnl:.2f}")
-        
         # Проверяем, активна ли запись
         is_rec = self.obs_controller.is_recording()
         logger.info(f"Current OBS recording status before stop: {is_rec}")
@@ -862,70 +850,38 @@ if __name__ == "__main__":
         socket = await MetaScalpSocket.discover()
         logger.info(f"WebSocket connected to port {socket.port}")
         
-        # Подписываемся на обновления позиций для КАЖДОГО активного подключения
+        # Подписываемся на обновления позиций
         for conn in active_connections:
             conn_id = conn["Id"]
             conn_name = conn["Name"]
             socket.subscribe(conn_id)
             logger.info(f"Subscribed to position updates for {conn_name}")
         
-        # REST watchdog для проверки позиций и получения PnL при открытии/закрытии
+        # Simple watchdog - check positions periodically
         async def rest_watchdog():
             while True:
-                await asyncio.sleep(1)
+                await asyncio.sleep(2)
                 try:
-                    if not client:
+                    if not client or not recorder._recording_active:
                         continue
                     
-                    # При открытии позиции - запоминаем finres Result
-                    start_data = getattr(recorder, '_pending_start_finres', None)
-                    if start_data:
-                        ticker, connection_id = start_data
-                        if connection_id:
-                            try:
-                                finres = await client.get_finres(connection_id)
-                                for item in finres.get("finreses", []):
-                                    if item.get("currency") == "USDT":
-                                        start_result = item.get("result", 0.0)
-                                        recorder._start_finres[ticker] = start_result
-                                        logger.info(f"📊 Start finres for {ticker}: {start_result}")
-                                        recorder._pending_start_finres = None
-                                        break
-                            except Exception as e:
-                                logger.warning(f"Failed to fetch start finres: {e}")
-                    
-                    # При закрытии позиции - вычисляем PnL
-                    close_data = getattr(recorder, '_pending_close_pnl', None)
-                    if close_data:
-                        ticker, connection_id = close_data
-                        if connection_id and ticker in recorder._start_finres:
-                            try:
-                                finres = await client.get_finres(connection_id)
-                                for item in finres.get("finreses", []):
-                                    if item.get("currency") == "USDT":
-                                        current_result = item.get("result", 0.0)
-                                        start_result = recorder._start_finres.get(ticker, 0.0)
-                                        pnl = current_result - start_result
-                                        logger.info(f"📊 PnL for {ticker}: current={current_result}, start={start_result}, pnl={pnl}")
-                                        
-                                        # Останавливаем запись с правильным PnL
-                                        recorder._recording_active = False
-                                        recorder._pending_close_pnl = None
-                                        recorder._stop_recording_flow(ticker, side if 'side' in locals() else "Unknown", pnl)
-                                        break
-                            except Exception as e:
-                                logger.warning(f"Failed to fetch PnL: {e}")
-                    
-                    # Проверяем позиции - если нет открытых, останавливаем запись
+                    # Check if any positions exist
+                    has_positions = False
                     for conn in active_connections:
                         pos_data = await client.get_positions(conn["Id"])
                         positions = pos_data.get("positions", [])
-                        if not positions and recorder._recording_active:
-                            logger.warning("⚠️ REST watchdog: no positions but recording active! Stopping...")
+                        if positions:
+                            has_positions = True
+                            break
+                    
+                    if not has_positions:
+                        logger.warning("⚠️ No positions - stopping recording")
+                        if recorder._recording_active:
+                            tickers_str = "+".join(sorted(recorder._session_tickers))
                             recorder._recording_active = False
-                            recorder._stop_recording_flow("unknown", "unknown", 0)
+                            recorder._stop_recording_flow(tickers_str, "unknown", 0)
                 except Exception as e:
-                    logger.debug(f"REST watchdog error: {e}")
+                    logger.debug(f"Watchdog error: {e}")
         
         @socket.on("position_update")
         def on_position(data):
@@ -943,17 +899,7 @@ if __name__ == "__main__":
                 side = "Short"
                 size = abs(size)
             
-            # При открытии позиции (status: "New")
-            if status and status.lower() == "new":
-                # Запоминаем что нужно получить finres при открытии
-                recorder._pending_start_finres = (ticker, connection_id)
-            # При закрытии позиции (status: "Closed")
-            elif status and status.lower() == "closed":
-                size = 0.0
-                recorder._pending_close_pnl = (ticker, connection_id)
-            else:
-                recorder._pending_close_pnl = None
-            
+            # Simple handler - just pass to recorder
             logger.info(f"Position: {ticker} {side} size={size}")
             recorder.handle_position_event(ticker, size, side, 0.0)
         
