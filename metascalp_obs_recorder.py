@@ -308,36 +308,36 @@ class TradingRecorder:
         """
         Handle a position update event from MetaScalp SDK.
         """
-        logger.info(f"Position update: {ticker} side={side} size={size} pnl={realized_pnl}")
+        # Нормализуем размер (берем абсолютное значение)
+        abs_size = abs(size)
         
-        # Получаем предыдущий размер позиции
-        prev_size = self._last_size.get(ticker, 0)
+        logger.info(f"Position update: {ticker} side={side} size={size} (abs={abs_size}) pnl={realized_pnl}")
         
-        # Определяем: была ли позиция открыта до этого?
-        was_open = prev_size != 0
+        # Получаем предыдущий абсолютный размер
+        prev_abs_size = abs(self._last_size.get(ticker, 0))
         
-        # Определяем: открыта ли позиция сейчас?
-        is_open = size != 0
+        # Определяем: была ли позиция открыта до этого? (размер != 0)
+        was_open = prev_abs_size != 0
+        
+        # Определяем: открыта ли позиция сейчас? (размер != 0)
+        is_open = abs_size != 0
         
         # СЛУЧАЙ 1: Позиция только что открылась (была 0, стала не 0)
         if not was_open and is_open:
-            logger.info(f"🟢 POSITION OPENED: {ticker} {side} size={size}")
+            logger.info(f"🟢 POSITION OPENED: {ticker} {side} size={abs_size}")
             self._recording_active = True
             self._last_ticker = ticker
             self._last_side = side
-            self._last_size[ticker] = size
             self._start_recording_flow(ticker, side)
         
         # СЛУЧАЙ 2: Позиция только что закрылась (была не 0, стала 0)
         elif was_open and not is_open:
             logger.info(f"🔴 POSITION CLOSED: {ticker} total PnL={realized_pnl}")
             self._recording_active = False
-            self._last_size[ticker] = size
             self._stop_recording_flow(ticker, side, realized_pnl)
         
-        # Всегда обновляем последний известный размер
-        elif is_open:
-            self._last_size[ticker] = size
+        # Всегда обновляем последний известный размер (сохраняем исходный, с знаком)
+        self._last_size[ticker] = size
     
     def _start_recording_flow(self, ticker: str, side: str):
         """Execute the recording start flow."""
@@ -354,16 +354,22 @@ class TradingRecorder:
     
     def _stop_recording_flow(self, ticker: str, side: str, pnl: float):
         """Execute the recording stop and file rename flow."""
-        logger.info(f"Stopping recording for {ticker} {side}, PnL: {pnl:.2f}")
+        logger.info(f"🛑 STOPPING recording for {ticker} {side}, PnL: {pnl:.2f}")
+        
+        # Проверяем, активна ли запись
+        is_rec = self.obs_controller.is_recording()
+        logger.info(f"Current OBS recording status before stop: {is_rec}")
         
         if self.obs_controller.stop_recording():
-            session = self.position_tracker.get_active_session()
-            if session:
-                session.is_recording = False
+            logger.info("✅ Stop recording command sent successfully")
             
-            # Wait for file finalization
+            # Ждем финализации файла
             logger.info("Waiting 2 seconds for file finalization...")
             time.sleep(2)
+            
+            # Проверяем, что запись действительно остановилась
+            is_rec_after = self.obs_controller.is_recording()
+            logger.info(f"Current OBS recording status after stop: {is_rec_after}")
             
             # Rename the recorded file
             self._rename_last_recording(ticker, side, pnl)
