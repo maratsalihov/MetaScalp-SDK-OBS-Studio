@@ -162,8 +162,15 @@ class OBSController:
                 "op": 6,
                 "d": {"requestType": "GetRecordStatus", "requestId": "1"}
             }))
-            # Don't wait for response – just assume not recording to be safe
-            return False
+            # Ждём ответ (op:7)
+            import time
+            time.sleep(0.3)
+            response = self.ws.recv()
+            if response:
+                data = json.loads(response)
+                record_status = data.get('d', {}).get('responseData', {}).get('outputActive', False)
+                logger.info(f"Record status: {record_status}")
+                return record_status
         except Exception as e:
             logger.error(f"Error checking record status: {e}")
             self.connected = False
@@ -197,26 +204,37 @@ class OBSController:
             # Identify
             ws.send(json.dumps({'op': 1, 'd': {'rpcVersion': 1, 'authentication': auth_str}}))
             
-            # Получим статус записи
-            ws.send(json.dumps({'op': 6, 'd': {'requestType': 'GetRecordStatus', 'requestId': '1'}}))
-            
-            import time
-            time.sleep(0.5)
-            try:
-                response = ws.recv()
-                if response:
-                    data = json.loads(response)
-                    record_data = data.get('d', {}).get('responseData', {})
-                    logger.info(f"Record status: {record_data}")
-            except Exception as e:
-                logger.info(f"No record status response: {e}")
+            # Ждём Identified (op:2)
+            identified = ws.recv()
+            if identified:
+                ident_data = json.loads(identified)
+                logger.info(f"Identified: {ident_data}")
+                if ident_data.get('op') == 2:
+                    if not ident_data.get('d', {}).get('requestStatus', {}).get('result', False):
+                        logger.error("Identify failed")
+                        ws.close()
+                        return False
             
             # StartRecord
             ws.send(json.dumps({'op': 6, 'd': {'requestType': 'StartRecord', 'requestId': '2'}}))
-            logger.info("Recording started")
+            
+            # Ждём ответ (op:7)
+            response = ws.recv()
+            if response:
+                resp_data = json.loads(response)
+                logger.info(f"StartRecord response: {resp_data}")
+                result = resp_data.get('d', {}).get('requestStatus', {}).get('result', False)
+                if result:
+                    logger.info("Recording started")
+                    ws.close()
+                    return True
+                else:
+                    logger.error(f"StartRecord failed: {resp_data}")
+                    ws.close()
+                    return False
             
             ws.close()
-            return True
+            return False
         except Exception as e:
             logger.error(f"Failed to start recording: {e}")
             return False
@@ -249,12 +267,37 @@ class OBSController:
             # Identify
             ws.send(json.dumps({'op': 1, 'd': {'rpcVersion': 1, 'authentication': auth_str}}))
             
+            # Ждём Identified (op:2)
+            identified = ws.recv()
+            if identified:
+                ident_data = json.loads(identified)
+                logger.info(f"Identified: {ident_data}")
+                if ident_data.get('op') == 2:
+                    if not ident_data.get('d', {}).get('requestStatus', {}).get('result', False):
+                        logger.error("Identify failed")
+                        ws.close()
+                        return False
+            
             # StopRecord
             ws.send(json.dumps({'op': 6, 'd': {'requestType': 'StopRecord', 'requestId': '2'}}))
-            logger.info("Recording stopped")
+            
+            # Ждём ответ (op:7)
+            response = ws.recv()
+            if response:
+                resp_data = json.loads(response)
+                logger.info(f"StopRecord response: {resp_data}")
+                result = resp_data.get('d', {}).get('requestStatus', {}).get('result', False)
+                if result:
+                    logger.info("Recording stopped")
+                    ws.close()
+                    return True
+                else:
+                    logger.error(f"StopRecord failed: {resp_data}")
+                    ws.close()
+                    return False
             
             ws.close()
-            return True
+            return False
         except Exception as e:
             logger.error(f"Failed to stop recording: {e}")
             return False
