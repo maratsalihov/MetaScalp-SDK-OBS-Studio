@@ -333,7 +333,10 @@ class TradingRecorder:
         # Determine position state
         # Buy/LONG = positive size, Sell = negative size
         position_opened = prev_size == 0 and size != 0 and not self._recording_active
-        position_closed = self._recording_active and size == 0
+        position_closed = self._recording_active and (size == 0 or size == "")
+        
+        # Debug
+        logger.info(f"DEBUG: prev={prev_size}, size={size}, opened={position_opened}, closed={position_closed}")
         
         # Start recording on position open
         if position_opened:
