@@ -882,7 +882,7 @@ if __name__ == "__main__":
                     logger.debug(f"REST watchdog error: {e}")
         
         @socket.on("position_update")
-        def on_position(data):
+        async def on_position(data):
             # ЛОГИРОВАНИЕ СЫРЫХ ДАННЫХ
             logger.info(f"RAW EVENT: {data}")
             
@@ -890,6 +890,7 @@ if __name__ == "__main__":
             size = float(data.get("size", 0))
             side = data.get("side", "Buy")
             realized_pnl = float(data.get("realizedPnl", 0) or 0)
+            connection_id = data.get("connectionId", 0)
             
             # Нормализуем размер
             if size < 0:
@@ -898,8 +899,21 @@ if __name__ == "__main__":
             
             # Проверяем status
             status = data.get("status", "")
+            
+            # При закрытии позиции - получаем PnL через REST
             if status and status.lower() in ("closed", "close"):
                 size = 0.0
+                # Пробуем получить PnL через REST
+                if connection_id and client:
+                    try:
+                        finres = await client.get_finres(connection_id)
+                        for item in finres.get("finreses", []):
+                            if item.get("currency") == "USDT":
+                                realized_pnl = item.get("result", 0.0)
+                                logger.info(f"📊 PnL from REST for {ticker}: {realized_pnl}")
+                                break
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch PnL: {e}")
             
             logger.info(f"Position: {ticker} {side} size={size} pnl={realized_pnl}")
             recorder.handle_position_event(ticker, size, side, realized_pnl)
