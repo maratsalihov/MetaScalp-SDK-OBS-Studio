@@ -169,7 +169,7 @@ class OBSController:
             self.connected = False
         return False
     
-    def start_recording(self) -> bool:
+def start_recording(self) -> bool:
         """Start recording in OBS."""
         try:
             import websocket
@@ -197,8 +197,23 @@ class OBSController:
             # Identify
             ws.send(json.dumps({'op': 1, 'd': {'rpcVersion': 1, 'authentication': auth_str}}))
             
+            # Сначала получим путь записи
+            ws.send(json.dumps({'op': 6, 'd': {'requestType': 'GetRecordStatus', 'requestId': '1'}}))
+            
+            import time
+            time.sleep(0.3)
+            try:
+                response = ws.recv()
+                if response:
+                    data = json.loads(response)
+                    output = data.get('d', {}).get('responseData', {})
+                    output_path = output.get('outputPath', '')
+                    logger.info(f"OBS will save to: {output_path}")
+            except:
+                pass
+            
             # StartRecord
-            ws.send(json.dumps({'op': 6, 'd': {'requestType': 'StartRecord', 'requestId': '1'}}))
+            ws.send(json.dumps({'op': 6, 'd': {'requestType': 'StartRecord', 'requestId': '2'}}))
             logger.info("Recording started")
             
             ws.close()
