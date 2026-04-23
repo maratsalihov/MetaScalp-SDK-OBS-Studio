@@ -332,11 +332,15 @@ class TradingRecorder:
         
         # Determine position state
         # Buy/LONG = positive size, Sell = negative size
+        # Position is closed when size becomes 0 OR when it flips sign (e.g., -90 to +90 means closed and reopened)
         position_opened = prev_size == 0 and size != 0 and not self._recording_active
-        position_closed = self._recording_active and (size == 0 or size == "")
+        position_closed = self._recording_active and (size == 0 or (prev_size != 0 and size == 0))
         
-        # Debug
-        logger.info(f"DEBUG: prev={prev_size}, size={size}, opened={position_opened}, closed={position_closed}")
+        # Also check for position flip (reverse trade closes old and opens new)
+        if prev_size != 0 and size != 0 and size != prev_size and abs(size) != abs(prev_size):
+            # Position changed significantly, might be a close + new
+            position_closed = True
+            logger.info(f"Position flip detected: {prev_size} -> {size}")
         
         # Start recording on position open
         if position_opened:
