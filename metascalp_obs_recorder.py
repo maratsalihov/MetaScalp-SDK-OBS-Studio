@@ -337,8 +337,11 @@ class TradingRecorder:
             self._start_recording_flow(ticker, session_after.side)
         
         # Detect: Position fully closed -> Stop recording
-        elif was_recording and session_after and not self.position_tracker.has_open_positions():
-            self._stop_recording_flow(ticker, session_after.side, session_after.total_pnl)
+        elif was_recording:
+            open_positions = self.position_tracker.has_open_positions()
+            logger.info(f"was_recording={was_recording}, has_open_positions={open_positions}, positions={list(self.position_tracker.positions.keys())}")
+            if not open_positions:
+                self._stop_recording_flow(ticker, session_after.side, session_after.total_pnl)
     
     def _start_recording_flow(self, ticker: str, side: str):
         """Execute the recording start flow."""
