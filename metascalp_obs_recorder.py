@@ -303,31 +303,46 @@ class TradingRecorder:
         
 # Track which tickers are currently being recorded
         self._recording_tickers: set = set()
-        
+        self._accumulated_pnl = {}  # Накопленный PnL для каждого тикера
+    
     def handle_position_event(self, ticker: str, size: float, side: str, realized_pnl: float = 0.0):
         """
         Handle a position update event from MetaScalp SDK.
         """
-        # Нормализуем размер (берем абсолютное значение)
-        abs_size = abs(size)
+        # Нормализуем размер: сохраняем знак в side
+        if size < 0:
+            side = "Short"
+            size = abs(size)  # делаем положительным
+        elif size > 0:
+            side = side.capitalize() if side else "Buy"
         
-        logger.info(f"Position update: {ticker} side={side} size={size} (abs={abs_size}) pnl={realized_pnl}")
+        logger.info(f"Position update: {ticker} side={side} size={size} pnl={realized_pnl}")
         
-        # Получаем предыдущий абсолютный размер
-        prev_abs_size = abs(self._last_size.get(ticker, 0))
+        # Накапливаем PnL для этого тикера
+        if ticker not in self._accumulated_pnl:
+            self._accumulated_pnl[ticker] = 0.0
+        
+        # Если есть realized_pnl в событии - добавляем
+        if realized_pnl != 0:
+            self._accumulated_pnl[ticker] += realized_pnl
+            logger.info(f"📈 Accumulated PnL for {ticker}: {self._accumulated_pnl[ticker]:.2f}")
+        
+        # Получаем предыдущий размер
+        prev_size = self._last_size.get(ticker, 0)
         
         # Определяем: была ли позиция открыта до этого? (размер != 0)
-        was_open = prev_abs_size != 0
+        was_open = prev_size != 0
         
         # Определяем: открыта ли позиция сейчас? (размер != 0)
-        is_open = abs_size != 0
+        is_open = size != 0
         
         # Отладочная информация
-        logger.info(f"📊 {ticker}: was_open={was_open}, is_open={is_open}, size={size}, prev_size={prev_abs_size}")
+        logger.info(f"📊 {ticker}: was_open={was_open}, is_open={is_open}, size={size}, prev_size={prev_size}")
         
         # СЛУЧАЙ 1: Позиция только что открылась (была 0, стала не 0)
         if not was_open and is_open:
             logger.info(f"🟢 OPEN -> START recording")
+            self._accumulated_pnl[ticker] = 0.0  # сбрасываем PnL при открытии
             self._recording_active = True
             self._last_ticker = ticker
             self._last_side = side
@@ -337,7 +352,9 @@ class TradingRecorder:
         elif was_open and not is_open:
             logger.info(f"🔴 CLOSE -> STOP recording")
             self._recording_active = False
-            self._stop_recording_flow(ticker, side, realized_pnl)
+            # Используем накопленный PnL
+            final_pnl = self._accumulated_pnl.get(ticker, realized_pnl)
+            self._stop_recording_flow(ticker, side, final_pnl)
         
         # Всегда обновляем последний известный размер
         self._last_size[ticker] = size
