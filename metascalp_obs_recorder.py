@@ -322,9 +322,12 @@ class TradingRecorder:
         # Определяем: открыта ли позиция сейчас? (размер != 0)
         is_open = abs_size != 0
         
+        # Отладочная информация
+        logger.info(f"📊 {ticker}: was_open={was_open}, is_open={is_open}, size={size}, prev_size={prev_abs_size}")
+        
         # СЛУЧАЙ 1: Позиция только что открылась (была 0, стала не 0)
         if not was_open and is_open:
-            logger.info(f"🟢 POSITION OPENED: {ticker} {side} size={abs_size}")
+            logger.info(f"🟢 OPEN -> START recording")
             self._recording_active = True
             self._last_ticker = ticker
             self._last_side = side
@@ -332,11 +335,11 @@ class TradingRecorder:
         
         # СЛУЧАЙ 2: Позиция только что закрылась (была не 0, стала 0)
         elif was_open and not is_open:
-            logger.info(f"🔴 POSITION CLOSED: {ticker} total PnL={realized_pnl}")
+            logger.info(f"🔴 CLOSE -> STOP recording")
             self._recording_active = False
             self._stop_recording_flow(ticker, side, realized_pnl)
         
-        # Всегда обновляем последний известный размер (сохраняем исходный, с знаком)
+        # Всегда обновляем последний известный размер
         self._last_size[ticker] = size
     
     def _start_recording_flow(self, ticker: str, side: str):
@@ -625,10 +628,19 @@ class MetaScalpSDKIntegration:
         }
         """
         try:
+            # ЛОГИРОВАНИЕ СЫРЫХ ДАННЫХ
+            logger.info(f"RAW EVENT: {data}")
+            
             ticker = data.get("ticker", "")
             size = float(data.get("size", 0))
             side = data.get("side", "Buy")
             realized_pnl = float(data.get("realizedPnl", 0) or 0)
+            
+            # ПРОВЕРЯЕМ ПОЛЕ STATUS
+            status = data.get("status", "")
+            if status and status.lower() in ("closed", "close"):
+                logger.info(f"Status indicates closed: {status}, setting size=0")
+                size = 0.0
             
             logger.debug(f"Position update: {ticker} size={size} side={side} realizedPnl={realized_pnl}")
             
@@ -856,6 +868,14 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Unexpected error: {e}", exc_info=True)
     finally:
+        # Принудительная остановка записи при выходе
+        if recorder._recording_active:
+            logger.warning("⚠️ Recording active on exit! Stopping recording...")
+            try:
+                recorder.obs_controller.stop_recording()
+            except Exception:
+                pass
+        
         # Cleanup
         if recorder.obs_controller.connected:
             try:
