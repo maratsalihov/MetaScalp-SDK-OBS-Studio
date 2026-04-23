@@ -287,6 +287,10 @@ class TradingRecorder:
             "[{date}_{time}] {ticker}_{side}_PnL_{pnl}.mp4"
         )
         
+        # Recording state - track manually
+        self._recording_active = False
+        self._last_ticker = ""
+        
         # Initialize components
         self.obs_controller = OBSController(
             self.obs_host, 
@@ -321,27 +325,22 @@ class TradingRecorder:
         
         logger.info(f"Position: {ticker} {side} size={size} pnl={realized_pnl}")
         
-        # Get state before processing
-        session_before = self.position_tracker.get_active_session()
-        was_recording = session_before.is_recording if session_before else False
+        # Check if position opened (size > 0 and wasn't recording)
+        position_opened = size != 0 and not self._recording_active
+        position_closed = self._recording_active and size == 0
         
-        # Process the position update through tracker
-        self.position_tracker.process_position_update(data)
+        # Start recording on position open
+        if position_opened:
+            logger.info(f"Позиция открыта {ticker} - запускаю запись")
+            self._last_ticker = ticker
+            self._recording_active = True
+            self._start_recording_flow(ticker, side)
         
-        # Get state after processing
-        session_after = self.position_tracker.get_active_session()
-        
-        # Detect: New position opened -> Start recording
-        if session_after and not was_recording and session_after.ticker == ticker:
-            logger.info(f"Новая позиция {ticker} - запускаю запись")
-            self._start_recording_flow(ticker, session_after.side)
-        
-        # Detect: Position fully closed -> Stop recording
-        elif was_recording:
-            open_positions = self.position_tracker.has_open_positions()
-            logger.info(f"was_recording={was_recording}, has_open_positions={open_positions}, positions={list(self.position_tracker.positions.keys())}")
-            if not open_positions:
-                self._stop_recording_flow(ticker, session_after.side, session_after.total_pnl)
+        # Stop recording on position close
+        elif position_closed:
+            logger.info(f"Позиция закрыта {ticker} - останавливаю запись")
+            self._recording_active = False
+            self._stop_recording_flow(ticker, side, realized_pnl)
     
     def _start_recording_flow(self, ticker: str, side: str):
         """Execute the recording start flow."""
