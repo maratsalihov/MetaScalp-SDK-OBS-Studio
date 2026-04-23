@@ -1,57 +1,47 @@
 import websocket
 import json
-import logging
 import time
 
-logger = logging.getLogger(__name__)
+host = "127.0.0.1"
+port = 4455
 
+ws = websocket.WebSocket(skip_utf8_validation=True)
+ws.settimeout(5)
 
-def test_without_password():
-    """Test connection without password"""
-    ws = websocket.WebSocket(skip_utf8_validation=True)
-    ws.settimeout(10)
-    url = "ws://100.101.91.69:4455"
-    print(f"Connecting to {url}...")
-    ws.connect(url)
+try:
+    ws.connect(f"ws://{host}:{port}")
+    hello = json.loads(ws.recv())
+    print(f"OBS: {hello['d'].get('obsStudioVersion')}")
     
-    # Hello
-    hello = ws.recv()
-    data = json.loads(hello)
-    print(f"Hello: {data['d']['obsStudioVersion']}, {data['d']['obsWebSocketVersion']}")
+    # Identify (no auth needed now)
+    ws.send(json.dumps({'op': 1, 'd': {'rpcVersion': 1}}))
     
-    # Check if auth required
-    auth_required = 'authentication' in data.get('d', {})
-    print(f"Authentication required: {auth_required}")
+    identified = ws.recv()
+    data = json.loads(identified)
+    print(f"Identified: {data}")
     
-    if auth_required:
-        # Build auth
-        import hashlib
-        import hmac
-        import base64
+    # Check if we got op:2 (Identified event) - success!
+    if data.get('op') == 2:
+        print("IDENTIFY SUCCESS!")
         
-        password = 'k8q9Tpt9oQIAVLU5'
-        salt = data['d']['authentication']['salt']
-        challenge = data['d']['authentication']['challenge']
+        # StartRecord
+        ws.send(json.dumps({'op': 6, 'd': {'requestType': 'StartRecord', 'requestId': '1'}}))
+        resp = ws.recv()
+        print(f"StartRecord: {resp}")
         
-        secret = hashlib.pbkdf2_hmac('sha256', password.encode(), base64.b64decode(salt), 60000)
-        auth = hmac.new(base64.b64decode(challenge), secret, hashlib.sha256).digest()
-        auth_str = base64.b64encode(auth).decode()
+        rdata = json.loads(resp)
+        result = rdata.get('d', {}).get('requestStatus', {}).get('result', False)
+        print(f"StartRecord result: {result}")
         
-        print(f"Auth: {auth_str}")
+        time.sleep(2)
         
-        # Send Identify with empty password
-        identify = {"op": 1, "d": {"rpcVersion": 1, "authentication": "", "eventSubscriptions": 1023}}
-        ws.send(json.dumps(identify))
-    else:
-        identify = {"op": 1, "d": {"rpcVersion": 1, "eventSubscriptions": 1023}}
-        ws.send(json.dumps(identify))
-    
-    time.sleep(0.5)
-    result = ws.recv()
-    print(f"Result: {repr(result)}")
+        ws.send(json.dumps({'op': 6, 'd': {'requestType': 'StopRecord', 'requestId': '2'}}))
+        resp = ws.recv()
+        print(f"StopRecord: {resp}")
+        
+        print("SUCCESS!")
     
     ws.close()
-
-
-if __name__ == "__main__":
-    test_without_password()
+    
+except Exception as e:
+    print(f"ERROR: {e}")
