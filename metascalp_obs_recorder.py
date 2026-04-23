@@ -793,12 +793,84 @@ async def run_with_metascalp_sdk():
 
 
 if __name__ == "__main__":
-    if not METASCALP_AVAILABLE:
-        print("WARNING: metascalp module not installed. Running in DEMO mode only.")
-        print("To use real MetaScalp SDK, install: pip install metascalp")
-        print()
+    import asyncio
+    from metascalp import MetaScalpClient, MetaScalpSocket
     
-    # Initialize the recorder
+    # Инициализируем рекордер
+    recorder = TradingRecorder()
+    
+    logger.info("=" * 60)
+    logger.info("MetaScalp + OBS Recording Automation")
+    logger.info("=" * 60)
+    logger.info(f"OBS Host: {recorder.obs_host}:{recorder.obs_port}")
+    logger.info(f"Video Path: {recorder.obs_video_path or '(auto-detect)'}")
+    logger.info(f"Filename Template: {recorder.filename_template}")
+    logger.info("=" * 60)
+    
+    logger.info("Testing OBS connection...")
+    if recorder.obs_controller.connect():
+        logger.info("OBS connection successful!")
+    else:
+        logger.warning("Could not connect to OBS. Ensure OBS is running with WebSocket enabled.")
+    
+    async def run_with_metascalp():
+        """Запускаем с MetaScalp SDK"""
+        logger.info("Connecting to MetaScalp...")
+        
+        # Подключаемся к MetaScalp
+        client = await MetaScalpClient.discover()
+        logger.info(f"Connected to MetaScalp on port {client.port}")
+        
+        # Получаем список соединений
+        data = await client.get_connections()
+        connections = data.get("connections", [])
+        
+        if not connections:
+            logger.error("No connections found in MetaScalp")
+            await client.close()
+            return
+        
+        # Используем первое соединение
+        conn = connections[0]
+        conn_id = conn["Id"]  # MetaScalp uses capital "Id"
+        conn_name = conn["Name"]
+        logger.info(f"Using connection: {conn_name}")
+        
+        # Подключаем WebSocket
+        socket = await MetaScalpSocket.discover()
+        logger.info(f"WebSocket connected to port {socket.port}")
+        
+        # Подписываемся на обновления позиций
+        socket.subscribe(conn_id)
+        
+        @socket.on("position_update")
+        def on_position(data):
+            ticker = data.get("ticker", "")
+            size = float(data.get("size", 0))
+            side = data.get("side", "Buy")
+            realized_pnl = float(data.get("realizedPnl", 0) or 0)
+            
+            logger.info(f"Position: {ticker} {side} size={size} pnl={realized_pnl}")
+            recorder.handle_position_event(ticker, size, side, realized_pnl)
+        
+        logger.info("Listening for position updates...")
+        logger.info("Press Ctrl+C to stop")
+        
+        await socket.listen_forever()
+    
+    try:
+        asyncio.run(run_with_metascalp())
+    except KeyboardInterrupt:
+        logger.info("\nShutdown requested by user")
+    except Exception as e:
+        logger.error(f"Error: {e}", exc_info=True)
+    finally:
+        if recorder.obs_controller.ws:
+            try:
+                recorder.obs_controller.ws.close()
+            except Exception:
+                pass
+        logger.info("Application terminated")
     recorder = TradingRecorder()
     
     # Log configuration
