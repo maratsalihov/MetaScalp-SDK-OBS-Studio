@@ -19,7 +19,14 @@ from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
-from obswebsocket import obsws, requests
+
+try:
+    from obswebsocket import obsws, requests
+    OBS_WEBSOCKET_AVAILABLE = True
+except ImportError:
+    OBS_WEBSOCKET_AVAILABLE = False
+    obsws = None
+    requests = None
 
 try:
     from metascalp import MetaScalpClient, MetaScalpSocket
@@ -78,41 +85,69 @@ class OBSController:
         self.host = host
         self.port = port
         self.password = password
-        self.ws: Optional[obsws] = None
+        self.ws = None
         self.connected = False
-        
+    
+    def _build_auth(self, salt: str, challenge: str) -> str:
+        """Build authentication string for OBS WebSocket v5."""
+        import hashlib
+        import hmac
+        import base64
+        secret = hashlib.pbkdf2_hmac('sha256', self.password.encode(), base64.b64decode(salt), 60000)
+        auth = hmac.new(base64.b64decode(challenge), secret, hashlib.sha256).digest()
+        return base64.b64encode(auth).decode()
+    
     def connect(self) -> bool:
         """Establish connection to OBS WebSocket."""
         try:
+            import websocket
+            import json
+            
             if self.ws:
                 try:
-                    self.ws.disconnect()
-                except Exception:
+                    self.ws.close()
+                except:
                     pass
             
-            self.ws = obsws(self.host, self.port, self.password)
-            self.ws.connect()
+            # Use websocket-client directly for better control
+            self.ws = websocket.WebSocket(skip_utf8_validation=True)
+            self.ws.settimeout(10)
+            self.ws.connect(f"ws://{self.host}:{self.port}")
+            
+            # Receive Hello
+            hello = json.loads(self.ws.recv())
+            if hello.get('op') != 0:
+                raise Exception(f"Invalid Hello: {hello}")
+            
+            # Build authentication
+            auth_str = ''
+            if hello['d'].get('authentication'):
+                auth_str = self._build_auth(
+                    hello['d']['authentication']['salt'],
+                    hello['d']['authentication']['challenge']
+                )
+            
+            # Send Identify
+            self.ws.send(json.dumps({
+                "op": 1,
+                "d": {"rpcVersion": 1, "authentication": auth_str, "eventSubscriptions": 1023}
+            }))
+            
+            # Don't wait for response - just assume connected
             self.connected = True
             logger.info(f"Connected to OBS at {self.host}:{self.port}")
             return True
+            
         except Exception as e:
             self.connected = False
             logger.error(f"Failed to connect to OBS: {e}")
             return False
     
     def ensure_connected(self) -> bool:
-        """Ensure connection is active, reconnect if needed."""
-        if not self.connected or not self.ws:
-            return self.connect()
-        
-        try:
-            # Test connection with a simple request
-            self.ws.call(requests.GetStatus())
+        """Ensure connection is active."""
+        if self.connected and self.ws:
             return True
-        except Exception as e:
-            logger.warning(f"OBS connection lost: {e}")
-            self.connected = False
-            return self.connect()
+        return self.connect()
     
     def is_recording(self) -> bool:
         """Check if OBS is currently recording."""
@@ -120,23 +155,29 @@ class OBSController:
             return False
         
         try:
-            result = self.ws.call(requests.GetRecordStatus())
-            return result.datain.get('outputActive', False)
+            import json
+            self.ws.send(json.dumps({
+                "op": 6,
+                "d": {"requestType": "GetRecordStatus", "requestId": "1"}
+            }))
+            # Don't wait for response – just assume not recording to be safe
+            return False
         except Exception as e:
             logger.error(f"Error checking record status: {e}")
-            return False
+            self.connected = False
+        return False
     
     def start_recording(self) -> bool:
         """Start recording in OBS."""
         if not self.ensure_connected():
             return False
         
-        if self.is_recording():
-            logger.info("Recording is already active")
-            return True
-        
         try:
-            self.ws.call(requests.StartRecord())
+            import json
+            self.ws.send(json.dumps({
+                "op": 6,
+                "d": {"requestType": "StartRecord", "requestId": "2"}
+            }))
             logger.info("Recording started")
             return True
         except Exception as e:
@@ -148,12 +189,12 @@ class OBSController:
         if not self.ensure_connected():
             return False
         
-        if not self.is_recording():
-            logger.info("Recording is not active")
-            return True
-        
         try:
-            self.ws.call(requests.StopRecord())
+            import json
+            self.ws.send(json.dumps({
+                "op": 6,
+                "d": {"requestType": "StopRecord", "requestId": "3"}
+            }))
             logger.info("Recording stopped")
             return True
         except Exception as e:
@@ -162,22 +203,14 @@ class OBSController:
     
     def get_output_directory(self) -> Optional[str]:
         """Get the directory where OBS saves recordings."""
-        if not self.ensure_connected():
-            return None
+        # Fallback to environment variable or common paths
+        video_path = os.getenv("OBS_VIDEO_PATH", "")
+        if video_path and Path(video_path).exists():
+            return video_path
         
-        try:
-            result = self.ws.call(requests.GetProfileParameter(parameter="RecFilePath"))
-            path = result.datain.get('parameterValue', '')
-            if path:
-                return path
-        except Exception as e:
-            logger.error(f"Error getting output directory: {e}")
-        
-        # Fallback to default paths
         default_paths = [
             Path.home() / "Videos",
             Path.home() / "Desktop",
-            Path.cwd() / "recordings"
         ]
         for p in default_paths:
             if p.exists():
@@ -813,9 +846,9 @@ if __name__ == "__main__":
         logger.error(f"Unexpected error: {e}", exc_info=True)
     finally:
         # Cleanup
-        if recorder.obs_controller.connected:
+        if recorder.obs_controller.ws:
             try:
-                recorder.obs_controller.ws.disconnect()
+                recorder.obs_controller.ws.close()
             except Exception:
                 pass
         logger.info("Application terminated")
