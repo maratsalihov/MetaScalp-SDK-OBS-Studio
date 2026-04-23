@@ -303,7 +303,8 @@ class TradingRecorder:
         
 # Track which tickers are currently being recorded
         self._recording_tickers: set = set()
-        self._accumulated_pnl = {}  # Накопленный PnL для каждого тикера
+        self._active_tickers = set()   # открытые сейчас
+        self._session_tickers = set()  # все тикеры за сессию
         self._pending_start_finres = None  # (ticker, connection_id) при открытии
         self._pending_close_pnl = None  # (ticker, connection_id) для закрытия с REST
         self._start_finres = {}  # ticker -> finres Result при открытии
@@ -311,55 +312,54 @@ class TradingRecorder:
     def handle_position_event(self, ticker: str, size: float, side: str, realized_pnl: float = 0.0):
         """
         Handle a position update event from MetaScalp SDK.
+        Поддержка нескольких тикеров одновременно.
         """
         # Нормализуем размер: сохраняем знак в side
         if size < 0:
             side = "Short"
-            size = abs(size)  # делаем положительным
+            size = abs(size)
         elif size > 0:
             side = side.capitalize() if side else "Buy"
         
-        logger.info(f"Position update: {ticker} side={side} size={size} pnl={realized_pnl}")
+        logger.info(f"Position update: {ticker} {side} size={size}")
         
-        # Накапливаем PnL для этого тикера
-        if ticker not in self._accumulated_pnl:
-            self._accumulated_pnl[ticker] = 0.0
+        # Определяем: была ли позиция открыта до этого?
+        was_open = ticker in self._active_tickers
         
-        # Если есть realized_pnl в событии - добавляем
-        if realized_pnl != 0:
-            self._accumulated_pnl[ticker] += realized_pnl
-            logger.info(f"📈 Accumulated PnL for {ticker}: {self._accumulated_pnl[ticker]:.2f}")
-        
-        # Получаем предыдущий размер
-        prev_size = self._last_size.get(ticker, 0)
-        
-        # Определяем: была ли позиция открыта до этого? (размер != 0)
-        was_open = prev_size != 0
-        
-        # Определяем: открыта ли позиция сейчас? (размер != 0)
+        # Определяем: открыта ли позиция сейчас?
         is_open = size != 0
         
-        # Отладочная информация
-        logger.info(f"📊 {ticker}: was_open={was_open}, is_open={is_open}, size={size}, prev_size={prev_size}")
-        
-        # СЛУЧАЙ 1: Позиция только что открылась (была 0, стала не 0)
+        # СЛУЧАЙ 1: Позиция открылась
         if not was_open and is_open:
-            logger.info(f"🟢 OPEN -> START recording")
-            self._accumulated_pnl[ticker] = 0.0  # сбрасываем PnL при открытии
-            self._recording_active = True
-            self._last_ticker = ticker
-            self._last_side = side
-            self._start_recording_flow(ticker, side)
+            logger.info(f"🟢 Position opened: {ticker}")
+            self._active_tickers.add(ticker)
+            self._session_tickers.add(ticker)  # запоминаем для имени файла
+            
+            # Если это первая позиция - старт записи
+            if len(self._active_tickers) == 1:
+                logger.info(f"First position -> START recording")
+                self._recording_active = True
+                self._last_ticker = ticker
+                self._last_side = side
+                self._start_recording_flow(ticker, side)
         
-        # СЛУЧАЙ 2: Позиция только что закрылась (была не 0, стала 0)
+        # СЛУЧАЙ 2: Позиция закрылась
         elif was_open and not is_open:
-            logger.info(f"🔴 CLOSE -> STOP recording")
-            self._recording_active = False
-            # Используем накопленный PnL
-            final_pnl = self._accumulated_pnl.get(ticker, realized_pnl)
-            self._stop_recording_flow(ticker, side, final_pnl)
+            logger.info(f"🔴 Position closed: {ticker}")
+            self._active_tickers.discard(ticker)
+            
+            # Если закрылась последняя позиция - стоп записи
+            if len(self._active_tickers) == 0:
+                logger.info(f"Last position -> STOP recording")
+                self._recording_active = False
+                # Формируем имя файла со всеми тикерами
+                tickers_str = "+".join(sorted(self._session_tickers))
+                logger.info(f"Session tickers: {tickers_str}")
+                self._stop_recording_flow(tickers_str, side, 0.0)
+                # Очищаем after остановки
+                self._session_tickers.clear()
         
-        # Всегда обновляем последний известный размер
+        # Всегда обновляем размер
         self._last_size[ticker] = size
     
     def _start_recording_flow(self, ticker: str, side: str):
