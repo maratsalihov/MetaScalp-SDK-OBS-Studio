@@ -301,65 +301,42 @@ class TradingRecorder:
         )
         self.position_tracker = MetaScalpPositionTracker()
         
-        # Track which tickers are currently being recorded
+# Track which tickers are currently being recorded
         self._recording_tickers: set = set()
         
     def handle_position_event(self, ticker: str, size: float, side: str, realized_pnl: float = 0.0):
         """
         Handle a position update event from MetaScalp SDK.
-        
-        This is the main entry point for integrating with MetaScalp SDK.
-        Call this method whenever you receive a position update from the SDK.
-        
-        Args:
-            ticker: Trading symbol
-            size: Current position size
-            side: Position side ("Buy"/"Sell" or "Long"/"Short")
-            realized_pnl: Realized PnL from this update
         """
-        # Create data dict in SDK format
-        data = {
-            "ticker": ticker,
-            "size": size,
-            "side": side,
-            "realizedPnl": realized_pnl
-        }
+        logger.info(f"Position update: {ticker} side={side} size={size} pnl={realized_pnl}")
         
-        logger.info(f"Position: {ticker} {side} size={size} pnl={realized_pnl}")
-        
-        # Track previous size
+        # Получаем предыдущий размер позиции
         prev_size = self._last_size.get(ticker, 0)
         
-        # Determine position state
-        # Buy/LONG = positive size, Sell = negative size
-        # Position is closed when size becomes 0 OR when it flips sign (e.g., -90 to +90 means closed and reopened)
-        position_opened = prev_size == 0 and size != 0 and not self._recording_active
-        position_closed = self._recording_active and (size == 0 or (prev_size != 0 and size == 0))
+        # Определяем: была ли позиция открыта до этого?
+        was_open = prev_size != 0
         
-        # Also check for position flip (reverse trade closes old and opens new)
-        if prev_size != 0 and size != 0 and size != prev_size and abs(size) != abs(prev_size):
-            # Position changed significantly, might be a close + new
-            position_closed = True
-            logger.info(f"Position flip detected: {prev_size} -> {size}")
+        # Определяем: открыта ли позиция сейчас?
+        is_open = size != 0
         
-        # Start recording on position open
-        if position_opened:
-            logger.info(f"Позиция открыта {ticker} - запускаю запись")
+        # СЛУЧАЙ 1: Позиция только что открылась (была 0, стала не 0)
+        if not was_open and is_open:
+            logger.info(f"🟢 POSITION OPENED: {ticker} {side} size={size}")
+            self._recording_active = True
             self._last_ticker = ticker
             self._last_side = side
-            self._recording_active = True
             self._last_size[ticker] = size
             self._start_recording_flow(ticker, side)
         
-        # Stop recording on position close
-        elif position_closed:
-            logger.info(f"Позиция закрыта {ticker} - останавливаю запись")
+        # СЛУЧАЙ 2: Позиция только что закрылась (была не 0, стала 0)
+        elif was_open and not is_open:
+            logger.info(f"🔴 POSITION CLOSED: {ticker} total PnL={realized_pnl}")
             self._recording_active = False
-            self._last_size[ticker] = 0
+            self._last_size[ticker] = size
             self._stop_recording_flow(ticker, side, realized_pnl)
         
-        # Update size tracking
-        elif size != 0:
+        # Всегда обновляем последний известный размер
+        elif is_open:
             self._last_size[ticker] = size
     
     def _start_recording_flow(self, ticker: str, side: str):
