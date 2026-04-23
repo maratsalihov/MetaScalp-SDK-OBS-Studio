@@ -116,13 +116,8 @@ class OBSController:
             hello = json.loads(ws.recv())
             obs_version = hello['d'].get('obsStudioVersion', 'unknown')
             
-            # Auth
-            auth_str = ''
-            if hello['d'].get('authentication'):
-                auth_str = self._build_auth(
-                    hello['d']['authentication']['salt'],
-                    hello['d']['authentication']['challenge']
-                )
+            # Auth - не используем пароль для локального подключения
+            auth_str = None
             
             # Identify
             ws.send(json.dumps({
@@ -193,13 +188,8 @@ class OBSController:
             # Hello
             hello = json.loads(ws.recv())
             
-            # Auth
-            auth_str = ''
-            if hello['d'].get('authentication'):
-                auth_str = self._build_auth(
-                    hello['d']['authentication']['salt'],
-                    hello['d']['authentication']['challenge']
-                )
+            # Auth - не используем пароль для локального подключения
+            auth_str = None
             
             # Identify
             ws.send(json.dumps({'op': 1, 'd': {'rpcVersion': 1, 'authentication': auth_str}}))
@@ -256,13 +246,8 @@ class OBSController:
             # Hello
             hello = json.loads(ws.recv())
             
-            # Auth
-            auth_str = ''
-            if hello['d'].get('authentication'):
-                auth_str = self._build_auth(
-                    hello['d']['authentication']['salt'],
-                    hello['d']['authentication']['challenge']
-                )
+            # Auth - не используем пароль для локального подключения
+            auth_str = None
             
             # Identify
             ws.send(json.dumps({'op': 1, 'd': {'rpcVersion': 1, 'authentication': auth_str}}))
