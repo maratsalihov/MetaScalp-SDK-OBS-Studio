@@ -825,23 +825,28 @@ if __name__ == "__main__":
         data = await client.get_connections()
         connections = data.get("connections", [])
         
-        if not connections:
-            logger.error("No connections found in MetaScalp")
+        # Фильтруем только активные подключения (State == 2)
+        active_connections = [c for c in connections if c.get("State") == 2]
+        
+        if not active_connections:
+            logger.error("No active connections found in MetaScalp")
             await client.close()
             return
         
-        # Используем первое соединение
-        conn = connections[0]
-        conn_id = conn["Id"]  # MetaScalp uses capital "Id"
-        conn_name = conn["Name"]
-        logger.info(f"Using connection: {conn_name}")
+        logger.info(f"Found {len(active_connections)} active connection(s):")
+        for conn in active_connections:
+            logger.info(f"  - {conn['Name']} (ID: {conn['Id']})")
         
         # Подключаем WebSocket
         socket = await MetaScalpSocket.discover()
         logger.info(f"WebSocket connected to port {socket.port}")
         
-        # Подписываемся на обновления позиций
-        socket.subscribe(conn_id)
+        # Подписываемся на обновления позиций для КАЖДОГО активного подключения
+        for conn in active_connections:
+            conn_id = conn["Id"]
+            conn_name = conn["Name"]
+            socket.subscribe(conn_id)
+            logger.info(f"Subscribed to position updates for {conn_name}")
         
         @socket.on("position_update")
         def on_position(data):
