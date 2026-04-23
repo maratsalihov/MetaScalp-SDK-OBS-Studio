@@ -927,8 +927,6 @@ if __name__ == "__main__":
             logger.info(f"Position: {ticker} {side} size={size} pnl={realized_pnl}")
             recorder.handle_position_event(ticker, size, side, realized_pnl)
         
-        socket.on("position_update", on_position)
-        
         logger.info("Listening for position updates...")
         logger.info("Press Ctrl+C to stop")
         
