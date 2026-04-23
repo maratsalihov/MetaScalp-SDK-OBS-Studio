@@ -3,18 +3,24 @@ MetaScalp SDK + OBS Studio Video Recording Automation
 
 This script monitors trading positions via MetaScalp SDK and controls
 OBS Studio recording based on position open/close events.
+
+Uses official MetaScalp SDK: https://github.com/MetaScalp/metascalp-sdk
+WebSocket endpoint: ws://127.0.0.1:17845/
+REST endpoint: http://127.0.0.1:17845/
 """
 
 import os
 import time
 import logging
+import asyncio
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 from obswebsocket import obsws, requests
+from metascalp import MetaScalpClient, MetaScalpSocket
 
 # Load environment variables
 load_dotenv()
@@ -28,32 +34,34 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class PositionInfo:
-    """Stores information about the current trading position."""
-    ticker: str = ""
-    side: str = ""  # "LONG" or "SHORT"
-    entry_time: Optional[datetime] = None
-    entry_pnl: float = 0.0
-    is_open: bool = False
+class PositionData:
+    """Stores information about a single position."""
+    ticker: str
+    size: float
+    side: str  # "Buy" or "Sell" from API
+    realized_pnl: float = 0.0
     
-    def reset(self):
-        """Reset position info to initial state."""
-        self.ticker = ""
-        self.side = ""
-        self.entry_time = None
-        self.entry_pnl = 0.0
-        self.is_open = False
+    @property
+    def is_open(self) -> bool:
+        return self.size > 0
+    
+    @property
+    def normalized_side(self) -> str:
+        """Normalize side to LONG or SHORT."""
+        side_upper = self.side.upper()
+        if side_upper in ("BUY", "LONG"):
+            return "LONG"
+        return "SHORT"
 
 
 @dataclass
 class TradeSession:
     """Tracks a complete trade session from entry to full exit."""
     ticker: str = ""
-    side: str = ""
+    side: str = ""  # LONG or SHORT
     entry_time: Optional[datetime] = None
     total_pnl: float = 0.0
     is_recording: bool = False
-    last_position_size: float = 0.0
 
 
 class OBSController:
@@ -173,84 +181,117 @@ class OBSController:
 
 class MetaScalpPositionTracker:
     """
-    Tracks position changes via MetaScalp SDK events.
+    Tracks position changes via MetaScalp SDK WebSocket events.
     
     This class implements event-driven logic to detect position
     openings and closings, handling partial closes correctly.
+    
+    Position data format from MetaScalp SDK:
+    {
+        "connectionId": int,
+        "ticker": str,
+        "size": float,
+        "side": str,  # "Buy" or "Sell"
+        "realizedPnl": float
+    }
     """
     
     def __init__(self):
-        self.current_position: PositionInfo = PositionInfo()
-        self.trade_session: TradeSession = TradeSession()
-        self._last_known_size: float = 0.0
-        self._accumulated_pnl: float = 0.0
+        self.positions: Dict[str, PositionData] = {}  # ticker -> PositionData
+        self.trade_session: Optional[TradeSession] = None
+        self._accumulated_pnl: Dict[str, float] = {}  # ticker -> accumulated pnl
         
-    def process_position_update(self, ticker: str, size: float, side: str, realized_pnl: float = 0.0):
+    def process_position_update(self, data: Dict[str, Any]):
         """
-        Process a position update from MetaScalp SDK.
+        Process a position update from MetaScalp SDK WebSocket.
         
         Args:
-            ticker: Trading symbol (e.g., "BTCUSDT")
-            size: Current position size (absolute value)
-            side: Position side ("Buy"/"Long" or "Sell"/"Short")
-            realized_pnl: Realized PnL from this update
+            data: Position data dict from SDK with keys:
+                - connectionId: int
+                - ticker: str
+                - size: float
+                - side: str ("Buy" or "Sell")
+                - realizedPnl: float (optional)
         """
-        normalized_side = self._normalize_side(side)
+        ticker = data.get("ticker", "")
+        size = float(data.get("size", 0))
+        side = data.get("side", "Buy")
+        realized_pnl = float(data.get("realizedPnl", 0) or 0)
         
-        # Detect position opening (size changed from 0 to > 0)
-        if self._last_known_size == 0 and size > 0:
-            self._on_position_open(ticker, size, normalized_side)
+        if not ticker:
+            logger.warning("Received position update without ticker")
+            return
         
-        # Accumulate PnL for partial closes
-        if realized_pnl != 0:
-            self._accumulated_pnl += realized_pnl
-            logger.info(f"Accumulated PnL: {self._accumulated_pnl:.2f} (this update: {realized_pnl:.2f})")
+        normalized_side = "LONG" if side.upper() in ("BUY", "LONG") else "SHORT"
         
-        # Detect position closing (size changed to 0)
-        if self._last_known_size > 0 and size == 0:
-            self._on_position_close(ticker, normalized_side)
+        # Check if we had a position before
+        had_position = ticker in self.positions and self.positions[ticker].is_open
         
-        self._last_known_size = size
-    
-    def _normalize_side(self, side: str) -> str:
-        """Normalize side string to LONG or SHORT."""
-        side_upper = side.upper()
-        if side_upper in ("BUY", "LONG"):
-            return "LONG"
-        elif side_upper in ("SELL", "SHORT"):
-            return "SHORT"
+        # Update or create position
+        if size > 0:
+            self.positions[ticker] = PositionData(
+                ticker=ticker,
+                size=size,
+                side=side,
+                realized_pnl=realized_pnl
+            )
+            
+            # Accumulate PnL for this ticker
+            if ticker not in self._accumulated_pnl:
+                self._accumulated_pnl[ticker] = 0.0
+            
+            if realized_pnl != 0:
+                self._accumulated_pnl[ticker] += realized_pnl
+                logger.info(f"Accumulated PnL for {ticker}: {self._accumulated_pnl[ticker]:.2f} (this update: {realized_pnl:.2f})")
+            
+            # Detect new position opening
+            if not had_position:
+                self._on_position_open(ticker, size, normalized_side)
+                
         else:
-            logger.warning(f"Unknown side '{side}', defaulting to LONG")
-            return "LONG"
+            # Position closed (size == 0)
+            if had_position:
+                total_pnl = self._accumulated_pnl.get(ticker, 0.0)
+                old_side = self.positions[ticker].normalized_side
+                self._on_position_close(ticker, old_side, total_pnl)
+            
+            # Clean up
+            if ticker in self.positions:
+                del self.positions[ticker]
+            if ticker in self._accumulated_pnl:
+                del self._accumulated_pnl[ticker]
     
     def _on_position_open(self, ticker: str, size: float, side: str):
         """Handle position opening event."""
-        self.current_position.ticker = ticker
-        self.current_position.side = side
-        self.current_position.entry_time = datetime.now()
-        self.current_position.is_open = True
-        self._accumulated_pnl = 0.0  # Reset accumulated PnL for new position
+        now = datetime.now()
         
-        self.trade_session.ticker = ticker
-        self.trade_session.side = side
-        self.trade_session.entry_time = datetime.now()
-        self.trade_session.total_pnl = 0.0
-        self.trade_session.is_recording = False
+        self.trade_session = TradeSession(
+            ticker=ticker,
+            side=side,
+            entry_time=now,
+            total_pnl=0.0,
+            is_recording=False
+        )
         
-        logger.info(f"Position opened: {ticker} {side} at {self.current_position.entry_time}")
+        logger.info(f"Position opened: {ticker} {side} at {now}")
     
-    def _on_position_close(self, ticker: str, side: str):
+    def _on_position_close(self, ticker: str, side: str, total_pnl: float):
         """Handle position closing event (full close)."""
-        self.trade_session.total_pnl = self._accumulated_pnl
+        if self.trade_session and self.trade_session.ticker == ticker:
+            self.trade_session.total_pnl = total_pnl
         
         logger.info(
             f"Position closed: {ticker} {side}, "
-            f"Total PnL: {self.trade_session.total_pnl:.2f}"
+            f"Total PnL: {total_pnl:.2f}"
         )
-        
-        # Reset for next position
-        self.current_position.reset()
-        self._last_known_size = 0.0
+    
+    def get_active_session(self) -> Optional[TradeSession]:
+        """Get the current active trade session if any."""
+        return self.trade_session
+    
+    def has_open_positions(self) -> bool:
+        """Check if there are any open positions."""
+        return any(pos.is_open for pos in self.positions.values())
 
 
 class TradingRecorder:
@@ -277,15 +318,9 @@ class TradingRecorder:
         )
         self.position_tracker = MetaScalpPositionTracker()
         
-        # Callbacks for OBS control
-        self._on_record_start_callback = None
-        self._on_record_stop_callback = None
+        # Track which tickers are currently being recorded
+        self._recording_tickers: set = set()
         
-    def set_callbacks(self, on_start=None, on_stop=None):
-        """Set callbacks for recording events."""
-        self._on_record_start_callback = on_start
-        self._on_record_stop_callback = on_stop
-    
     def handle_position_event(self, ticker: str, size: float, side: str, realized_pnl: float = 0.0):
         """
         Handle a position update event from MetaScalp SDK.
@@ -296,39 +331,45 @@ class TradingRecorder:
         Args:
             ticker: Trading symbol
             size: Current position size
-            side: Position side
+            side: Position side ("Buy"/"Sell" or "Long"/"Short")
             realized_pnl: Realized PnL from this update
         """
-        previous_state = self.position_tracker.current_position.is_open
+        # Create data dict in SDK format
+        data = {
+            "ticker": ticker,
+            "size": size,
+            "side": side,
+            "realizedPnl": realized_pnl
+        }
         
-        # Process the position update
-        self.position_tracker.process_position_update(ticker, size, side, realized_pnl)
+        # Get state before processing
+        session_before = self.position_tracker.get_active_session()
+        was_recording = session_before.is_recording if session_before else False
         
-        current_state = self.position_tracker.current_position.is_open
+        # Process the position update through tracker
+        self.position_tracker.process_position_update(data)
         
-        # Detect transition: No position -> Position opened
-        if not previous_state and current_state:
-            self._start_recording_flow(
-                ticker,
-                self.position_tracker.current_position.side
-            )
+        # Get state after processing
+        session_after = self.position_tracker.get_active_session()
         
-        # Detect transition: Position -> No position (full close)
-        if previous_state and not current_state:
-            self._stop_recording_flow(
-                ticker,
-                self.position_tracker.trade_session.side,
-                self.position_tracker.trade_session.total_pnl
-            )
+        # Detect: New position opened -> Start recording
+        if session_after and not was_recording and session_after.ticker == ticker:
+            self._start_recording_flow(ticker, session_after.side)
+        
+        # Detect: Position fully closed -> Stop recording
+        elif was_recording and session_after and not self.position_tracker.has_open_positions():
+            self._stop_recording_flow(ticker, session_after.side, session_after.total_pnl)
     
     def _start_recording_flow(self, ticker: str, side: str):
         """Execute the recording start flow."""
         logger.info(f"Starting recording for {ticker} {side}")
         
         if self.obs_controller.start_recording():
-            self.position_tracker.trade_session.is_recording = True
-            if self._on_record_start_callback:
-                self._on_record_start_callback(ticker, side)
+            session = self.position_tracker.get_active_session()
+            if session:
+                session.is_recording = True
+            # Callback removed
+                
         else:
             logger.error("Failed to start recording - will retry on next event")
     
@@ -337,7 +378,9 @@ class TradingRecorder:
         logger.info(f"Stopping recording for {ticker} {side}, PnL: {pnl:.2f}")
         
         if self.obs_controller.stop_recording():
-            self.position_tracker.trade_session.is_recording = False
+            session = self.position_tracker.get_active_session()
+            if session:
+                session.is_recording = False
             
             # Wait for file finalization
             logger.info("Waiting 2 seconds for file finalization...")
@@ -346,8 +389,8 @@ class TradingRecorder:
             # Rename the recorded file
             self._rename_last_recording(ticker, side, pnl)
             
-            if self._on_record_stop_callback:
-                self._on_record_stop_callback(ticker, side, pnl)
+            # Callback removed
+                
         else:
             logger.error("Failed to stop recording")
     
@@ -498,6 +541,215 @@ def create_metascalp_event_handler(recorder: TradingRecorder):
         recorder.handle_position_event(ticker, size, side, realized_pnl)
     
     return on_position_update
+
+
+class MetaScalpSDKIntegration:
+    """
+    Integrates with the official MetaScalp SDK for real-time position updates.
+    
+    Uses MetaScalpSocket from the official SDK:
+    https://github.com/MetaScalp/metascalp-sdk
+    
+    WebSocket endpoint: ws://127.0.0.1:17845/
+    REST endpoint: http://127.0.0.1:17845/
+    
+    Usage:
+        recorder = TradingRecorder()
+        integration = MetaScalpSDKIntegration(recorder)
+        await integration.run()
+    """
+    
+    def __init__(self, recorder: TradingRecorder):
+        self.recorder = recorder
+        self.socket: Optional[MetaScalpSocket] = None
+        self.client: Optional[MetaScalpClient] = None
+        self.connection_id: Optional[int] = None
+        self._running = False
+        
+    async def connect(self, max_retries: int = 5, retry_delay: float = 2.0) -> bool:
+        """
+        Connect to MetaScalp via WebSocket.
+        
+        Auto-discovers the running MetaScalp instance on ports 17845-17855.
+        """
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Connecting to MetaScalp SDK (attempt {attempt + 1}/{max_retries})...")
+                
+                # Discover and connect to WebSocket
+                self.socket = await MetaScalpSocket.discover(timeout=2.0)
+                logger.info(f"WebSocket connected to MetaScalp on port {self.socket.port}")
+                
+                # Get connection ID via REST client
+                self.client = await MetaScalpClient.discover(timeout=2.0)
+                logger.info(f"REST client connected to MetaScalp on port {self.client.port}")
+                
+                # Get available connections
+                connections_data = await self.client.get_connections()
+                connections = connections_data.get("connections", [])
+                
+                if not connections:
+                    logger.error("No active exchange connections found in MetaScalp")
+                    await self.close()
+                    return False
+                
+                # Use the first active connection
+                self.connection_id = connections[0]["id"]
+                logger.info(f"Using connection ID: {self.connection_id} ({connections[0]['name']})")
+                
+                # Subscribe to position updates
+                self.socket.subscribe(self.connection_id)
+                logger.info(f"Subscribed to position updates for connection {self.connection_id}")
+                
+                # Register position update handler
+                @self.socket.on("position_update")
+                def on_position(data):
+                    self._handle_position_event(data)
+                
+                self._running = True
+                return True
+                
+            except ConnectionError as e:
+                logger.error(f"Connection attempt {attempt + 1} failed: {e}")
+                if attempt < max_retries - 1:
+                    logger.info(f"Retrying in {retry_delay}s...")
+                    await asyncio.sleep(retry_delay)
+                else:
+                    logger.error("Max retries reached. Could not connect to MetaScalp.")
+                    return False
+            except Exception as e:
+                logger.error(f"Unexpected error during connection: {e}", exc_info=True)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                else:
+                    return False
+        
+        return False
+    
+    def _handle_position_event(self, data: Dict[str, Any]):
+        """
+        Handle raw position update from MetaScalp SDK.
+        
+        SDK position data format:
+        {
+            "connectionId": int,
+            "ticker": str,
+            "size": float,
+            "side": str,  # "Buy" or "Sell"
+            "realizedPnl": float (optional)
+        }
+        """
+        try:
+            ticker = data.get("ticker", "")
+            size = float(data.get("size", 0))
+            side = data.get("side", "Buy")
+            realized_pnl = float(data.get("realizedPnl", 0) or 0)
+            
+            logger.debug(f"Position update: {ticker} size={size} side={side} realizedPnl={realized_pnl}")
+            
+            self.recorder.handle_position_event(ticker, size, side, realized_pnl)
+            
+        except Exception as e:
+            logger.error(f"Error processing position event: {e}", exc_info=True)
+    
+    async def run(self):
+        """
+        Run the main event loop.
+        
+        Connects to MetaScalp and listens for position updates indefinitely.
+        Implements auto-reconnect on connection loss.
+        """
+        while True:
+            if not await self.connect():
+                logger.warning("Failed to connect to MetaScalp. Retrying in 10s...")
+                await asyncio.sleep(10)
+                continue
+            
+            logger.info("Listening for position updates from MetaScalp SDK...")
+            logger.info("Press Ctrl+C to stop")
+            
+            try:
+                # Start listening for WebSocket messages
+                await self.socket.listen_forever()
+            except Exception as e:
+                logger.error(f"WebSocket error: {e}")
+            finally:
+                self._running = False
+            
+            if not self._running:
+                break
+            
+            # Reconnect after disconnection
+            logger.info("Connection lost. Reconnecting in 5s...")
+            await asyncio.sleep(5)
+    
+    async def close(self):
+        """Clean up resources."""
+        self._running = False
+        
+        if self.socket:
+            try:
+                await self.socket.disconnect()
+            except Exception:
+                pass
+        
+        if self.client:
+            try:
+                await self.client.close()
+            except Exception:
+                pass
+        
+        logger.info("MetaScalp SDK integration closed")
+
+
+async def run_with_metascalp_sdk():
+    """
+    Main entry point for running with real MetaScalp SDK.
+    
+    This function initializes the TradingRecorder and MetaScalpSDKIntegration,
+    then runs the event loop.
+    """
+    recorder = TradingRecorder()
+    
+    # Log configuration
+    logger.info("=" * 60)
+    logger.info("MetaScalp SDK + OBS Recording Automation")
+    logger.info("=" * 60)
+    logger.info(f"OBS Host: {recorder.obs_host}:{recorder.obs_port}")
+    logger.info(f"Video Path: {recorder.obs_video_path or '(auto-detect)'}")
+    logger.info(f"Filename Template: {recorder.filename_template}")
+    logger.info("=" * 60)
+    
+    # Test OBS connection
+    logger.info("Testing OBS connection...")
+    if recorder.obs_controller.connect():
+        logger.info("OBS connection successful!")
+        is_rec = recorder.obs_controller.is_recording()
+        logger.info(f"Current recording status: {'ACTIVE' if is_rec else 'INACTIVE'}")
+    else:
+        logger.warning("Could not connect to OBS. Ensure OBS is running with WebSocket enabled.")
+        logger.warning("The script will continue and retry connections as needed.")
+    
+    # Initialize MetaScalp SDK integration
+    integration = MetaScalpSDKIntegration(recorder)
+    
+    try:
+        await integration.run()
+    except KeyboardInterrupt:
+        logger.info("\nShutdown requested by user")
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}", exc_info=True)
+    finally:
+        await integration.close()
+        
+        # Cleanup OBS
+        if recorder.obs_controller.connected:
+            try:
+                recorder.obs_controller.ws.disconnect()
+            except Exception:
+                pass
+        
+        logger.info("Application terminated")
 
 
 if __name__ == "__main__":
