@@ -304,7 +304,9 @@ class TradingRecorder:
 # Track which tickers are currently being recorded
         self._recording_tickers: set = set()
         self._accumulated_pnl = {}  # Накопленный PnL для каждого тикера
+        self._pending_start_finres = None  # (ticker, connection_id) при открытии
         self._pending_close_pnl = None  # (ticker, connection_id) для закрытия с REST
+        self._start_finres = {}  # ticker -> finres Result при открытии
     
     def handle_position_event(self, ticker: str, size: float, side: str, realized_pnl: float = 0.0):
         """
@@ -866,37 +868,61 @@ if __name__ == "__main__":
             socket.subscribe(conn_id)
             logger.info(f"Subscribed to position updates for {conn_name}")
         
-        # REST watchdog для проверки позиций и получения PnL при закрытии
+        # REST watchdog для проверки позиций и получения PnL при открытии/закрытии
         async def rest_watchdog():
             while True:
                 await asyncio.sleep(1)
                 try:
-                    # Проверяем есть ли ожидающий закрытие с REST
-                    if recorder._pending_close_pnl and client:
-                        ticker, connection_id = recorder._pending_close_pnl
+                    if not client:
+                        continue
+                    
+                    # При открытии позиции - запоминаем finres Result
+                    start_data = getattr(recorder, '_pending_start_finres', None)
+                    if start_data:
+                        ticker, connection_id = start_data
                         if connection_id:
                             try:
                                 finres = await client.get_finres(connection_id)
                                 for item in finres.get("finreses", []):
                                     if item.get("currency") == "USDT":
-                                        pnl = item.get("result", 0.0)
-                                        logger.info(f"📊 PnL from REST for {ticker}: {pnl}")
-                                        # Обновляем PnL
-                                        recorder._accumulated_pnl[ticker] = pnl
+                                        start_result = item.get("result", 0.0)
+                                        recorder._start_finres[ticker] = start_result
+                                        logger.info(f"📊 Start finres for {ticker}: {start_result}")
+                                        recorder._pending_start_finres = None
+                                        break
+                            except Exception as e:
+                                logger.warning(f"Failed to fetch start finres: {e}")
+                    
+                    # При закрытии позиции - вычисляем PnL
+                    close_data = getattr(recorder, '_pending_close_pnl', None)
+                    if close_data:
+                        ticker, connection_id = close_data
+                        if connection_id and ticker in recorder._start_finres:
+                            try:
+                                finres = await client.get_finres(connection_id)
+                                for item in finres.get("finreses", []):
+                                    if item.get("currency") == "USDT":
+                                        current_result = item.get("result", 0.0)
+                                        start_result = recorder._start_finres.get(ticker, 0.0)
+                                        pnl = current_result - start_result
+                                        logger.info(f"📊 PnL for {ticker}: current={current_result}, start={start_result}, pnl={pnl}")
+                                        
+                                        # Останавливаем запись с правильным PnL
+                                        recorder._recording_active = False
                                         recorder._pending_close_pnl = None
+                                        recorder._stop_recording_flow(ticker, side if 'side' in locals() else "Unknown", pnl)
                                         break
                             except Exception as e:
                                 logger.warning(f"Failed to fetch PnL: {e}")
                     
-                    # Проверяем позиции
-                    if client:
-                        for conn in active_connections:
-                            pos_data = await client.get_positions(conn["Id"])
-                            positions = pos_data.get("positions", [])
-                            if not positions and recorder._recording_active:
-                                logger.warning("⚠️ REST watchdog: no positions but recording active! Stopping...")
-                                recorder._recording_active = False
-                                recorder._stop_recording_flow("unknown", "unknown", 0)
+                    # Проверяем позиции - если нет открытых, останавливаем запись
+                    for conn in active_connections:
+                        pos_data = await client.get_positions(conn["Id"])
+                        positions = pos_data.get("positions", [])
+                        if not positions and recorder._recording_active:
+                            logger.warning("⚠️ REST watchdog: no positions but recording active! Stopping...")
+                            recorder._recording_active = False
+                            recorder._stop_recording_flow("unknown", "unknown", 0)
                 except Exception as e:
                     logger.debug(f"REST watchdog error: {e}")
         
@@ -908,24 +934,27 @@ if __name__ == "__main__":
             ticker = data.get("ticker", "")
             size = float(data.get("size", 0))
             side = data.get("side", "Buy")
-            realized_pnl = float(data.get("realizedPnl", 0) or 0)
             connection_id = data.get("connectionId", 0)
             status = data.get("status", "")
-            
-            # При закрытии позиции - получаем PnL через REST (синхронно нельзя, запоминаем)
-            if status and status.lower() in ("closed", "close"):
-                size = 0.0
-                recorder._pending_close_pnl = (ticker, connection_id)
-            else:
-                recorder._pending_close_pnl = None
             
             # Нормализуем размер
             if size < 0:
                 side = "Short"
                 size = abs(size)
             
-            logger.info(f"Position: {ticker} {side} size={size} pnl={realized_pnl}")
-            recorder.handle_position_event(ticker, size, side, realized_pnl)
+            # При открытии позиции (status: "New")
+            if status and status.lower() == "new":
+                # Запоминаем что нужно получить finres при открытии
+                recorder._pending_start_finres = (ticker, connection_id)
+            # При закрытии позиции (status: "Closed")
+            elif status and status.lower() == "closed":
+                size = 0.0
+                recorder._pending_close_pnl = (ticker, connection_id)
+            else:
+                recorder._pending_close_pnl = None
+            
+            logger.info(f"Position: {ticker} {side} size={size}")
+            recorder.handle_position_event(ticker, size, side, 0.0)
         
         logger.info("Listening for position updates...")
         logger.info("Press Ctrl+C to stop")
