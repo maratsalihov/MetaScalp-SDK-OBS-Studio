@@ -169,7 +169,7 @@ class OBSController:
             self.connected = False
         return False
     
-def start_recording(self) -> bool:
+    def start_recording(self) -> bool:
         """Start recording in OBS."""
         try:
             import websocket
