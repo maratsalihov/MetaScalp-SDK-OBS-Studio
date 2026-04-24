@@ -1143,49 +1143,9 @@ if __name__ == "__main__":
             conn_id = conn["Id"]
             conn_name = conn["Name"]
             socket.subscribe(conn_id)
-            logger.info(f"Subscribed to position updates for {conn_name}")
+            logger.info(f"Subscribed to {conn_name}")
         
-# Subscribed - check for existing positions via sync requests
-        logger.info("🔍 Checking for existing positions...")
-        found_any = False
-        try:
-            for conn in active_connections:
-                conn_id = conn["Id"]
-                conn_name = conn["Name"]
-                try:
-                    url = f"http://127.0.0.1:17845/api/connections/{conn_id}/positions"
-                    logger.info(f"Checking {conn_name} ({conn_id})...")
-                    resp = http_requests.get(url, timeout=3)
-                    logger.info(f"Response: {resp.status_code}")
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        positions = data.get("positions", [])
-                        logger.info(f"Positions: {positions}")
-                        for pos in positions:
-                            ticker = pos.get("ticker", pos.get("Ticker", ""))
-                            if ticker:
-                                found_any = True
-                                recorder._active_tickers.add(ticker)
-                                recorder._session_tickers.add(ticker)
-                                recorder._had_position_opened = True
-                                logger.info(f"✅ Found position: {ticker} on {conn_name}")
-                except Exception as e:
-                    logger.error(f"Error checking {conn_name}: {e}")
-        except Exception as e:
-            logger.error(f"REST check failed: {e}")
-        
-        if found_any:
-            tickers_str = "+".join(sorted(recorder._session_tickers))
-            logger.info(f"🎬 Starting recording for: {tickers_str}")
-            recorder._recording_active = True
-            recorder._recording_start_time = datetime.now()
-            recorder._start_recording_flow(tickers_str, "unknown")
-        else:
-            logger.info("No existing positions found")
-        
-        logger.info("Listening for position updates via WebSocket...")
-        logger.info("Press Ctrl+C to stop")
-        
+        # ===== ОДНОРАЗОВАЯ ПРОВЕРКА СУЩЕСТВУЮЩИХ ПОЗИЦИЙ =====
         logger.info("🔍 Checking for existing positions (one-time)...")
         existing_found = False
         
@@ -1215,7 +1175,37 @@ if __name__ == "__main__":
             recorder._recording_start_time = datetime.now()
             recorder._start_recording_flow(tickers_str, "unknown")
         
-        logger.info("Listening for position updates via WebSocket...")
+        # ===== ОБРАБОТЧИКИ WEBSOCKET =====
+        @socket.on("position_update")
+        def on_position(data):
+            logger.info(f"📊 POSITION: {data}")
+            ticker = data.get("ticker", "")
+            size = float(data.get("size", 0))
+            side = data.get("side", "Buy")
+            status = data.get("status", "")
+            
+            if size < 0:
+                side = "Short"
+                size = abs(size)
+            
+            if status and status.lower() == "closed":
+                logger.info(f"🔴 Position closed via status")
+                size = 0.0
+            
+            recorder.handle_position_event(ticker, size, side, 0.0)
+        
+        @socket.on("order_update")
+        def on_order(data):
+            logger.info(f"📝 ORDER: {data}")
+            ticker = data.get("ticker", "")
+            order_id = str(data.get("orderId", data.get("order_id", "")))
+            status = data.get("status", "")
+            side = data.get("side", "Buy")
+            order_type = data.get("type", "Limit")
+            
+            recorder.handle_order_event(ticker, order_id, status, side, order_type)
+        
+        logger.info("✅ Listening for position/order updates via WebSocket...")
         logger.info("Press Ctrl+C to stop")
         
         try:
