@@ -1146,46 +1146,42 @@ if __name__ == "__main__":
             logger.info(f"Subscribed to position updates for {conn_name}")
         
 # Subscribed - check for existing positions via sync requests
-        # Use requests library (not async) for reliability
-        # Check ALL connections
+        logger.info("🔍 Checking for existing positions...")
+        found_any = False
         try:
             for conn in active_connections:
                 conn_id = conn["Id"]
                 conn_name = conn["Name"]
                 try:
-                    resp = requests.get(
-                        f"http://127.0.0.1:17845/api/connections/{conn_id}/positions",
-                        timeout=2
-                    )
+                    url = f"http://127.0.0.1:17845/api/connections/{conn_id}/positions"
+                    logger.info(f"Checking {conn_name} ({conn_id})...")
+                    resp = requests.get(url, timeout=3)
+                    logger.info(f"Response: {resp.status_code}")
                     if resp.status_code == 200:
-                        positions = resp.json().get("positions", [])
+                        data = resp.json()
+                        positions = data.get("positions", [])
+                        logger.info(f"Positions: {positions}")
                         for pos in positions:
-                            # API returns "Ticker" with capital T!
                             ticker = pos.get("ticker", pos.get("Ticker", ""))
                             if ticker:
+                                found_any = True
                                 recorder._active_tickers.add(ticker)
                                 recorder._session_tickers.add(ticker)
                                 recorder._had_position_opened = True
-                                logger.info(f"Found position on {conn_name}: {ticker}")
-                        if not positions:
-                            logger.info(f"No positions on {conn_name}")
+                                logger.info(f"✅ Found position: {ticker} on {conn_name}")
                 except Exception as e:
-                    logger.debug(f"Error checking {conn_name}: {e}")
+                    logger.error(f"Error checking {conn_name}: {e}")
         except Exception as e:
-            logger.debug(f"REST check failed: {e}")
+            logger.error(f"REST check failed: {e}")
         
-        existing_count = len(recorder._active_tickers) + len(recorder._session_tickers)
-        if existing_count > 0:
-            if not recorder._recording_active:
-                logger.info(f"Found existing positions/orders ({existing_count}) -> START recording")
-                recorder._recording_active = True
-                recorder._recording_start_time = datetime.now()
-                recorder._start_recording_flow(
-                    "+".join(sorted(recorder._session_tickers)) or "unknown",
-                    "unknown"
-                )
+        if found_any:
+            tickers_str = "+".join(sorted(recorder._session_tickers))
+            logger.info(f"🎬 Starting recording for: {tickers_str}")
+            recorder._recording_active = True
+            recorder._recording_start_time = datetime.now()
+            recorder._start_recording_flow(tickers_str, "unknown")
         else:
-            logger.info("No existing positions or orders found")
+            logger.info("No existing positions found")
         
         logger.info("Listening for position updates via WebSocket...")
         logger.info("Press Ctrl+C to stop")
