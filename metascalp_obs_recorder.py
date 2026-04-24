@@ -821,15 +821,29 @@ class MetaScalpSDKIntegration:
         logger.info("Checking for existing positions/orders...")
         
         try:
-            # Check positions via REST
-            positions_data = await self.client.get_positions(self.connection_id)
-            positions = positions_data.get("positions", [])
-            
-            # Check orders via REST
+            # Check positions via REST with timeout
             try:
-                orders_data = await self.client.get_orders(self.connection_id)
+                positions_data = await asyncio.wait_for(
+                    self.client.get_positions(self.connection_id),
+                    timeout=5.0
+                )
+                positions = positions_data.get("positions", [])
+            except asyncio.TimeoutError:
+                logger.warning("Timeout checking positions")
+                positions = []
+            except Exception as e:
+                logger.debug(f"Error checking positions: {e}")
+                positions = []
+            
+            # Check orders via REST with timeout
+            try:
+                orders_data = await asyncio.wait_for(
+                    self.client.get_orders(self.connection_id),
+                    timeout=5.0
+                )
                 orders = orders_data.get("orders", [])
-            except:
+            except Exception as e:
+                logger.debug(f"Error checking orders: {e}")
                 orders = []
             
             logger.info(f"Found {len(positions)} positions and {len(orders)} active orders")
@@ -1136,26 +1150,39 @@ if __name__ == "__main__":
         logger.info("Checking for existing positions/orders...")
         for conn in active_connections:
             conn_id = conn["Id"]
-            # Check positions
-            pos_data = await client.get_positions(conn_id)
-            positions = pos_data.get("positions", [])
-            for pos in positions:
-                ticker = pos.get("ticker", "")
-                if ticker:
-                    recorder._active_tickers.add(ticker)
-                    recorder._session_tickers.add(ticker)
-                    recorder._had_position_opened = True
-            
-            # Check orders
+            # Check positions (with timeout handling)
             try:
-                orders_data = await client.get_orders(conn_id)
+                pos_data = await asyncio.wait_for(
+                    client.get_positions(conn_id), 
+                    timeout=5.0
+                )
+                positions = pos_data.get("positions", [])
+                for pos in positions:
+                    ticker = pos.get("ticker", "")
+                    if ticker:
+                        recorder._active_tickers.add(ticker)
+                        recorder._session_tickers.add(ticker)
+                        recorder._had_position_opened = True
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout checking positions for {conn['Name']}")
+            except Exception as e:
+                logger.debug(f"Error checking positions for {conn['Name']}: {e}")
+            
+            # Check orders (with timeout handling)
+            try:
+                orders_data = await asyncio.wait_for(
+                    client.get_orders(conn_id), 
+                    timeout=5.0
+                )
                 orders = orders_data.get("orders", [])
                 for order in orders:
                     ticker = order.get("ticker", "")
                     if ticker:
                         recorder._session_tickers.add(ticker)
-            except:
-                pass
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout checking orders for {conn['Name']}")
+            except Exception as e:
+                logger.debug(f"Error checking orders for {conn['Name']}: {e}")
         
         existing_count = len(recorder._active_tickers) + len(recorder._session_tickers)
         if existing_count > 0:
