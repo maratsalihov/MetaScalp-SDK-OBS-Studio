@@ -15,6 +15,7 @@ import time
 import logging
 import asyncio
 import threading
+import requests
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any, List
@@ -1144,9 +1145,25 @@ if __name__ == "__main__":
             socket.subscribe(conn_id)
             logger.info(f"Subscribed to position updates for {conn_name}")
         
-        # Subscribed - now rely on WebSocket for position updates
-        # MetaScalp SDK sends position_update for existing positions automatically
-        logger.info("Subscribed. Waiting for position updates via WebSocket...")
+# Subscribed - check for existing positions via sync requests
+        # Use requests library (not async) for reliability
+        try:
+            resp = requests.get(
+                f"http://127.0.0.1:17845/api/connections/{active_connections[0]['Id']}/positions",
+                timeout=3
+            )
+            if resp.status_code == 200:
+                positions = resp.json().get("positions", [])
+                for pos in positions:
+                    ticker = pos.get("ticker", "")
+                    if ticker:
+                        recorder._active_tickers.add(ticker)
+                        recorder._session_tickers.add(ticker)
+                        recorder._had_position_opened = True
+                if positions:
+                    logger.info(f"Found {len(positions)} existing positions: {[p.get('ticker') for p in positions]}")
+        except Exception as e:
+            logger.debug(f"REST check failed: {e}")
         
         existing_count = len(recorder._active_tickers) + len(recorder._session_tickers)
         if existing_count > 0:
@@ -1161,90 +1178,7 @@ if __name__ == "__main__":
         else:
             logger.info("No existing positions or orders found")
         
-        # Simple watchdog - check positions periodically
-        async def rest_watchdog():
-            while True:
-                await asyncio.sleep(2)
-                try:
-                    if not client:
-                        continue
-                    
-                    # Check if any positions exist
-                    has_positions = False
-                    total_positions = 0
-                    for conn in active_connections:
-                        pos_data = await client.get_positions(conn["Id"])
-                        positions = pos_data.get("positions", [])
-                        total_positions += len(positions)
-                        if positions:
-                            has_positions = True
-                            logger.debug(f"Positions on {conn['Name']}: {len(positions)}")
-                    
-                    logger.info(f"📊 Total positions: {total_positions}, recording_active={recorder._recording_active}")
-                    
-                    # Check active orders too
-                    total_orders = 0
-                    for conn in active_connections:
-                        try:
-                            orders_data = await client.get_orders(conn["Id"])
-                            orders = orders_data.get("orders", [])
-                            total_orders += len(orders)
-                        except:
-                            pass
-                    
-                    logger.info(f"📊 Positions: {total_positions}, Orders: {total_orders}")
-                    
-                    if not has_positions and recorder._recording_active:
-                        # Only stop if no orders either
-                        if total_orders == 0:
-                            suffix = "" if recorder._had_position_opened else "_NOFill"
-                            logger.warning("⚠️ No positions and no orders - stopping recording!")
-                            tickers_str = "+".join(sorted(recorder._session_tickers)) if recorder._session_tickers else "unknown"
-                            recorder._recording_active = False
-                            recorder._stop_recording_flow(tickers_str, "unknown", 0, suffix)
-                except Exception as e:
-                    logger.debug(f"Watchdog error: {e}")
-        
-        @socket.on("position_update")
-        def on_position(data):
-            # ЛОГИРОВАНИЕ СЫРЫХ ДАННЫХ
-            logger.info(f"RAW EVENT: {data}")
-            
-            ticker = data.get("ticker", "")
-            size = float(data.get("size", 0))
-            side = data.get("side", "Buy")
-            connection_id = data.get("connectionId", 0)
-            status = data.get("status", "")
-            
-            # Нормализуем размер
-            if size < 0:
-                side = "Short"
-                size = abs(size)
-            
-            # Simple handler - just pass to recorder
-            logger.info(f"Position: {ticker} {side} size={size}")
-            
-            # Check status - Closed means position is closed even if size != 0
-            is_closed = status and status.lower() == "closed"
-            if is_closed:
-                size = 0  # Force close
-            
-            recorder.handle_position_event(ticker, size, side, 0.0)
-        
-        @socket.on("order_update")
-        def on_order(data):
-            logger.info(f"🐞 ORDER_UPDATE: {data}")
-            logger.info(f"🐞 All fields: key={data.keys()}")
-            
-            ticker = data.get("ticker", "")
-            order_id = str(data.get("orderId", data.get("order_id", "")))
-            status = data.get("status", "")
-            side = data.get("side", "Buy")
-            order_type = data.get("type", "Limit")
-            
-            recorder.handle_order_event(ticker, order_id, status, side, order_type)
-        
-        logger.info("Listening for position updates...")
+        logger.info("Listening for position updates via WebSocket...")
         logger.info("Press Ctrl+C to stop")
         
         # Запускаем watchdog параллельно
