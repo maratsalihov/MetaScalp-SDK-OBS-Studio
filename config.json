@@ -1,0 +1,10 @@
+{
+  "obs": {
+    "host": "127.0.0.1",
+    "port": 4455,
+    "password": "",
+    "video_path": "e:\\video"
+  },
+  "exchange_ids": [],
+  "filename_template": "{date}_{time}_{tickers}.mp4"
+}
