@@ -1147,21 +1147,29 @@ if __name__ == "__main__":
         
 # Subscribed - check for existing positions via sync requests
         # Use requests library (not async) for reliability
+        # Check ALL connections
         try:
-            resp = requests.get(
-                f"http://127.0.0.1:17845/api/connections/{active_connections[0]['Id']}/positions",
-                timeout=3
-            )
-            if resp.status_code == 200:
-                positions = resp.json().get("positions", [])
-                for pos in positions:
-                    ticker = pos.get("ticker", "")
-                    if ticker:
-                        recorder._active_tickers.add(ticker)
-                        recorder._session_tickers.add(ticker)
-                        recorder._had_position_opened = True
-                if positions:
-                    logger.info(f"Found {len(positions)} existing positions: {[p.get('ticker') for p in positions]}")
+            for conn in active_connections:
+                conn_id = conn["Id"]
+                conn_name = conn["Name"]
+                try:
+                    resp = requests.get(
+                        f"http://127.0.0.1:17845/api/connections/{conn_id}/positions",
+                        timeout=2
+                    )
+                    if resp.status_code == 200:
+                        positions = resp.json().get("positions", [])
+                        for pos in positions:
+                            ticker = pos.get("ticker", "")
+                            if ticker:
+                                recorder._active_tickers.add(ticker)
+                                recorder._session_tickers.add(ticker)
+                                recorder._had_position_opened = True
+                                logger.info(f"Found position on {conn_name}: {ticker}")
+                        if not positions:
+                            logger.info(f"No positions on {conn_name}")
+                except Exception as e:
+                    logger.debug(f"Error checking {conn_name}: {e}")
         except Exception as e:
             logger.debug(f"REST check failed: {e}")
         
