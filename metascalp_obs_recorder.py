@@ -1160,7 +1160,8 @@ if __name__ == "__main__":
                     if resp.status_code == 200:
                         positions = resp.json().get("positions", [])
                         for pos in positions:
-                            ticker = pos.get("ticker", "")
+                            # API returns "Ticker" with capital T!
+                            ticker = pos.get("ticker", pos.get("Ticker", ""))
                             if ticker:
                                 recorder._active_tickers.add(ticker)
                                 recorder._session_tickers.add(ticker)
