@@ -17,7 +17,6 @@ import asyncio
 import threading
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
 
 try:
@@ -318,6 +317,13 @@ class TradingRecorder:
         # Track recording start time for file identification
         self._recording_start_time = None  # datetime when recording started
         
+        # Cooldown settings for frequent trades
+        self._cooldown_seconds = 10  # Don't stop for 10 seconds after close
+        self._stop_scheduled = False  # True if stop is pending
+        self._stop_timer = None  # Timer thread for delayed stop
+        self._pending_ticker = ""  # Ticker for scheduled stop
+        self._pending_side = ""  # Side for scheduled stop
+        
         # Initialize components
         self.obs_controller = OBSController(
             self.obs_host, 
@@ -356,6 +362,11 @@ class TradingRecorder:
         
         # СЛУЧАЙ 1: Позиция открылась
         if not was_open and is_open:
+            # Cancel any scheduled stop (cooldown)
+            if self._stop_scheduled:
+                logger.info(f"🟢 New position before cooldown ends -> canceling scheduled stop")
+                self._cancel_scheduled_stop()
+            
             logger.info(f"🟢 Position opened: {ticker}")
             self._active_tickers.add(ticker)
             self._session_tickers.add(ticker)  # запоминаем для имени файла
@@ -378,17 +389,10 @@ class TradingRecorder:
             
             logger.info(f"Active tickers now: {self._active_tickers}")
             
-            # Если закрылась последняя позиция - стоп записи
+            # Если закрылась последняя позиция - планируем стоп с cooldown
             if len(self._active_tickers) == 0:
-                logger.info(f"Last position -> STOP recording")
-                self._recording_active = False
-                # Формируем имя файла со всеми тикерами
-                tickers_str = "+".join(sorted(self._session_tickers)) if self._session_tickers else ticker
-                logger.info(f"Session tickers: {tickers_str}")
-                self._stop_recording_flow(tickers_str, side, 0.0)
-                # Очищаем after остановки
-                self._session_tickers.clear()
-                self._had_position_opened = False
+                logger.info(f"Last position closed -> scheduling stop in {self._cooldown_seconds}s (cooldown)")
+                self._schedule_stop_recording(ticker, side)
         
         # Всегда обновляем размер
         self._last_size[ticker] = size
@@ -464,6 +468,37 @@ class TradingRecorder:
         else:
             logger.error("Failed to start recording - will retry on next event")
     
+    def _schedule_stop_recording(self, ticker: str, side: str):
+        """Schedule recording stop after cooldown period."""
+        if self._stop_scheduled:
+            logger.info("Stop already scheduled, skipping")
+            return
+        
+        self._stop_scheduled = True
+        self._pending_ticker = "+".join(sorted(self._session_tickers)) if self._session_tickers else ticker
+        self._pending_side = side
+        
+        def delayed_stop():
+            if self._stop_scheduled:  # Double-check not canceled
+                logger.info(f"Cooldown expired -> executing scheduled stop")
+                self._recording_active = False
+                self._stop_recording_flow(self._pending_ticker, side, 0.0)
+                self._session_tickers.clear()
+                self._had_position_opened = False
+                self._stop_scheduled = False
+        
+        self._stop_timer = threading.Timer(self._cooldown_seconds, delayed_stop)
+        self._stop_timer.start()
+        logger.info(f"Stop scheduled for {self._cooldown_seconds}s from now")
+    
+    def _cancel_scheduled_stop(self):
+        """Cancel scheduled recording stop."""
+        if self._stop_timer and self._stop_scheduled:
+            self._stop_timer.cancel()
+            self._stop_timer = None
+            self._stop_scheduled = False
+            logger.info("Scheduled stop cancelled")
+    
     def _stop_recording_flow(self, ticker: str, side: str, pnl: float, suffix: str = ""):
         """Execute the recording stop and file rename flow."""
         # Проверяем, активна ли запись
@@ -479,9 +514,9 @@ class TradingRecorder:
             time.sleep(1)
             self.obs_controller.stop_recording()
         
-        # Ждем финализации файла
-        logger.info("Waiting 3 seconds for file finalization...")
-        time.sleep(3)
+        # Ждем финализации файла (увеличено для надежности)
+        logger.info("Waiting 6 seconds for file finalization...")
+        time.sleep(6)
         
         # Проверяем, что запись действительно остановилась
         is_rec_after = self.obs_controller.is_recording()
@@ -565,11 +600,22 @@ class TradingRecorder:
             new_name = f"{timestamp}_{base_name}"
             new_path = video_path / new_name
         
-        try:
-            latest_file.rename(new_path)
-            logger.info(f"Renamed: {latest_file.name} -> {new_path.name}")
-        except Exception as e:
-            logger.error(f"Failed to rename file: {e}")
+        # Retry loop for file access (handles WinError 32 - file in use)
+        max_retries = 10
+        for attempt in range(max_retries):
+            try:
+                latest_file.rename(new_path)
+                logger.info(f"Renamed: {latest_file.name} -> {new_path.name}")
+                return
+            except PermissionError as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"File busy (attempt {attempt + 1}/{max_retries}), retrying in 1s...")
+                    time.sleep(1)
+                else:
+                    logger.error(f"Failed to rename after {max_retries} attempts: {e}")
+            except Exception as e:
+                logger.error(f"Failed to rename file: {e}")
+                return
     
     def _format_pnl(self, pnl: float) -> str:
         """Format PnL value with sign."""
