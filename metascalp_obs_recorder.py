@@ -793,6 +793,9 @@ class MetaScalpSDKIntegration:
                 def on_order(data):
                     self._handle_order_event(data)
                 
+                # Check for existing positions/orders and start recording if needed
+                await self._check_existing_positions()
+                
                 self._running = True
                 return True
                 
@@ -812,6 +815,52 @@ class MetaScalpSDKIntegration:
                     return False
         
         return False
+    
+    async def _check_existing_positions(self):
+        """Check for existing positions/orders on startup and start recording if needed."""
+        logger.info("Checking for existing positions/orders...")
+        
+        try:
+            # Check positions via REST
+            positions_data = await self.client.get_positions(self.connection_id)
+            positions = positions_data.get("positions", [])
+            
+            # Check orders via REST
+            try:
+                orders_data = await self.client.get_orders(self.connection_id)
+                orders = orders_data.get("orders", [])
+            except:
+                orders = []
+            
+            logger.info(f"Found {len(positions)} positions and {len(orders)} active orders")
+            
+            # If there are existing positions or orders, start recording
+            if positions or orders:
+                for pos in positions:
+                    ticker = pos.get("ticker", "")
+                    if ticker:
+                        self.recorder._active_tickers.add(ticker)
+                        self.recorder._session_tickers.add(ticker)
+                        self.recorder._had_position_opened = True
+                
+                for order in orders:
+                    ticker = order.get("ticker", "")
+                    if ticker:
+                        self.recorder._session_tickers.add(ticker)
+                
+                if not self.recorder._recording_active:
+                    logger.info("Existing positions/orders found -> START recording")
+                    self.recorder._recording_active = True
+                    self.recorder._recording_start_time = datetime.now()
+                    self.recorder._start_recording_flow(
+                        "+".join(sorted(self.recorder._session_tickers)) or "unknown",
+                        "unknown"
+                    )
+            else:
+                logger.info("No existing positions or orders found")
+                
+        except Exception as e:
+            logger.error(f"Error checking existing positions: {e}")
     
     def _handle_position_event(self, data: Dict[str, Any]):
         """
@@ -1082,6 +1131,44 @@ if __name__ == "__main__":
             conn_name = conn["Name"]
             socket.subscribe(conn_id)
             logger.info(f"Subscribed to position updates for {conn_name}")
+        
+        # Проверяем существующие позиции/ордера при запуске
+        logger.info("Checking for existing positions/orders...")
+        for conn in active_connections:
+            conn_id = conn["Id"]
+            # Check positions
+            pos_data = await client.get_positions(conn_id)
+            positions = pos_data.get("positions", [])
+            for pos in positions:
+                ticker = pos.get("ticker", "")
+                if ticker:
+                    recorder._active_tickers.add(ticker)
+                    recorder._session_tickers.add(ticker)
+                    recorder._had_position_opened = True
+            
+            # Check orders
+            try:
+                orders_data = await client.get_orders(conn_id)
+                orders = orders_data.get("orders", [])
+                for order in orders:
+                    ticker = order.get("ticker", "")
+                    if ticker:
+                        recorder._session_tickers.add(ticker)
+            except:
+                pass
+        
+        existing_count = len(recorder._active_tickers) + len(recorder._session_tickers)
+        if existing_count > 0:
+            if not recorder._recording_active:
+                logger.info(f"Found existing positions/orders ({existing_count}) -> START recording")
+                recorder._recording_active = True
+                recorder._recording_start_time = datetime.now()
+                recorder._start_recording_flow(
+                    "+".join(sorted(recorder._session_tickers)) or "unknown",
+                    "unknown"
+                )
+        else:
+            logger.info("No existing positions or orders found")
         
         # Simple watchdog - check positions periodically
         async def rest_watchdog():
