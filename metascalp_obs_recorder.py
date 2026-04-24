@@ -1178,16 +1178,35 @@ if __name__ == "__main__":
         else:
             logger.info("No existing positions or orders found")
         
-        logger.info("Listening for position updates via WebSocket...")
+logger.info("Listening for position updates via WebSocket...")
         logger.info("Press Ctrl+C to stop")
         
-        # Запускаем watchdog параллельно
-        watchdog = asyncio.create_task(rest_watchdog())
+        # Simple watchdog for recording state
+        async def watchdog():
+            while True:
+                await asyncio.sleep(5)
+                # Используем sync requests для проверки
+                try:
+                    resp = requests.get(
+                        f"http://127.0.0.1:17845/api/connections/{active_connections[0]['Id']}/positions",
+                        timeout=2
+                    )
+                    if resp.status_code == 200:
+                        positions = resp.json().get("positions", [])
+                        has_positions = len(positions) > 0
+                        
+                        if not has_positions and recorder._recording_active:
+                            logger.info("Watchdog: no positions, stopping recording")
+                            recorder._recording_active = False
+                except:
+                    pass
+        
+        watchdog_task = asyncio.create_task(watchdog())
         
         try:
             await socket.listen_forever()
         finally:
-            watchdog.cancel()
+            watchdog_task.cancel()
         
         await client.close()
     
