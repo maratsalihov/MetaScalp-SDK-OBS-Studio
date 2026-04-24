@@ -15,7 +15,6 @@ import time
 import logging
 import asyncio
 import threading
-import requests
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any, List
@@ -29,13 +28,14 @@ except ImportError:
     TKINTER_AVAILABLE = False
     tk = None
 
+import requests as http_requests  # импортируем ДО obswebsocket
+
 try:
-    from obswebsocket import obsws, requests
+    from obswebsocket import obsws
     OBS_WEBSOCKET_AVAILABLE = True
 except ImportError:
     OBS_WEBSOCKET_AVAILABLE = False
     obsws = None
-    requests = None
 
 from dotenv import load_dotenv
 
@@ -1155,7 +1155,7 @@ if __name__ == "__main__":
                 try:
                     url = f"http://127.0.0.1:17845/api/connections/{conn_id}/positions"
                     logger.info(f"Checking {conn_name} ({conn_id})...")
-                    resp = requests.get(url, timeout=3)
+                    resp = http_requests.get(url, timeout=3)
                     logger.info(f"Response: {resp.status_code}")
                     if resp.status_code == 200:
                         data = resp.json()
@@ -1192,7 +1192,7 @@ if __name__ == "__main__":
                 await asyncio.sleep(5)
                 # Используем sync requests для проверки
                 try:
-                    resp = requests.get(
+                    resp = http_requests.get(
                         f"http://127.0.0.1:17845/api/connections/{active_connections[0]['Id']}/positions",
                         timeout=2
                     )
