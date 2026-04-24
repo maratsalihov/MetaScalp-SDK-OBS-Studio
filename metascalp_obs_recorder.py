@@ -1146,43 +1146,46 @@ if __name__ == "__main__":
             socket.subscribe(conn_id)
             logger.info(f"Subscribed to position updates for {conn_name}")
         
-        # Проверяем существующие позиции/ордера при запуске
+        # Проверяем существующие позиции/ордера при запуске (первая активная биржа)
         logger.info("Checking for existing positions/orders...")
-        for conn in active_connections:
-            conn_id = conn["Id"]
-            # Check positions (with timeout handling)
-            try:
-                pos_data = await asyncio.wait_for(
-                    client.get_positions(conn_id), 
-                    timeout=5.0
+        try:
+            if active_connections:
+                conn_id = active_connections[0]["Id"]
+                try:
+                    pos_data = await asyncio.wait_for(
+                        client.get_positions(conn_id),
+                        timeout=5.0
+                    )
+                    positions = pos_data.get("positions", [])
+                    
+                    for pos in positions:
+                        ticker = pos.get("ticker", "")
+                        if ticker:
+                            recorder._active_tickers.add(ticker)
+                            recorder._session_tickers.add(ticker)
+                            recorder._had_position_opened = True
+                    
+                    if positions:
+                        logger.info(f"Found {len(positions)} existing positions")
+                except asyncio.TimeoutError:
+                    logger.warning("Timeout checking positions")
+                except Exception as e:
+                    logger.debug(f"Error: {e}")
+        except Exception as e:
+            pass
+        
+        existing_count = len(recorder._active_tickers) + len(recorder._session_tickers)
+        if existing_count > 0:
+            if not recorder._recording_active:
+                logger.info(f"Found {existing_count} existing positions/orders -> START recording")
+                recorder._recording_active = True
+                recorder._recording_start_time = datetime.now()
+                recorder._start_recording_flow(
+                    "+".join(sorted(recorder._session_tickers)) or "unknown",
+                    "unknown"
                 )
-                positions = pos_data.get("positions", [])
-                for pos in positions:
-                    ticker = pos.get("ticker", "")
-                    if ticker:
-                        recorder._active_tickers.add(ticker)
-                        recorder._session_tickers.add(ticker)
-                        recorder._had_position_opened = True
-            except asyncio.TimeoutError:
-                logger.warning(f"Timeout checking positions for {conn['Name']}")
-            except Exception as e:
-                logger.debug(f"Error checking positions for {conn['Name']}: {e}")
-            
-            # Check orders (with timeout handling)
-            try:
-                orders_data = await asyncio.wait_for(
-                    client.get_orders(conn_id), 
-                    timeout=5.0
-                )
-                orders = orders_data.get("orders", [])
-                for order in orders:
-                    ticker = order.get("ticker", "")
-                    if ticker:
-                        recorder._session_tickers.add(ticker)
-            except asyncio.TimeoutError:
-                logger.warning(f"Timeout checking orders for {conn['Name']}")
-            except Exception as e:
-                logger.debug(f"Error checking orders for {conn['Name']}: {e}")
+        else:
+            logger.info("No existing positions or orders found")
         
         existing_count = len(recorder._active_tickers) + len(recorder._session_tickers)
         if existing_count > 0:
