@@ -788,12 +788,13 @@ class MetaScalpSDKIntegration:
                 def on_position(data):
                     self._handle_position_event(data)
                 
-                # Register order update handler
+# Register order update handler
                 @self.socket.on("order_update")
                 def on_order(data):
                     self._handle_order_event(data)
                 
                 self._running = True
+                logger.info("Subscribed. Waiting for position updates via WebSocket...")
                 return True
                 
             except ConnectionError as e:
@@ -1143,33 +1144,9 @@ if __name__ == "__main__":
             socket.subscribe(conn_id)
             logger.info(f"Subscribed to position updates for {conn_name}")
         
-        # Быстрая проверка всех бирж (2 сек таймаут на каждую)
-        for conn in active_connections:
-            conn_id = conn["Id"]
-            conn_name = conn["Name"]
-            try:
-                pos_data = await asyncio.wait_for(
-                    client.get_positions(conn_id),
-                    timeout=2.0
-                )
-                positions = pos_data.get("positions", [])
-                for pos in positions:
-                    ticker = pos.get("ticker", "")
-                    if ticker:
-                        recorder._active_tickers.add(ticker)
-                        recorder._session_tickers.add(ticker)
-                        recorder._had_position_opened = True
-                        logger.info(f"Found existing position on {conn_name}: {ticker}")
-            except:
-                pass
-        
-        if recorder._active_tickers and not recorder._recording_active:
-            recorder._recording_active = True
-            recorder._recording_start_time = datetime.now()
-            tickers = "+".join(sorted(recorder._session_tickers))
-            recorder._start_recording_flow(tickers, "unknown")
-        
-        logger.info("Listening for position updates...")
+        # Subscribed - now rely on WebSocket for position updates
+        # MetaScalp SDK sends position_update for existing positions automatically
+        logger.info("Subscribed. Waiting for position updates via WebSocket...")
         
         existing_count = len(recorder._active_tickers) + len(recorder._session_tickers)
         if existing_count > 0:
