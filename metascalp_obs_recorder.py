@@ -1143,9 +1143,30 @@ if __name__ == "__main__":
             socket.subscribe(conn_id)
             logger.info(f"Subscribed to position updates for {conn_name}")
         
-        # Не проверяем через REST - полагаемся на WebSocket события
-        # MetaScalp пришлёт position_update для уже открытых позиций автоматически
-        logger.info("Waiting for position updates via WebSocket...")
+        # Быстрая проверка первой биржи (2 сек таймаут)
+        try:
+            conn_id = active_connections[0]["Id"]
+            pos_data = await asyncio.wait_for(
+                client.get_positions(conn_id),
+                timeout=2.0
+            )
+            positions = pos_data.get("positions", [])
+            for pos in positions:
+                ticker = pos.get("ticker", "")
+                if ticker:
+                    recorder._active_tickers.add(ticker)
+                    recorder._session_tickers.add(ticker)
+                    recorder._had_position_opened = True
+                    logger.info(f"Found existing position: {ticker}")
+            
+            if positions and not recorder._recording_active:
+                recorder._recording_active = True
+                recorder._recording_start_time = datetime.now()
+                recorder._start_recording_flow(ticker, "unknown")
+        except:
+            pass
+        
+        logger.info("Listening for position updates...")
         
         existing_count = len(recorder._active_tickers) + len(recorder._session_tickers)
         if existing_count > 0:
