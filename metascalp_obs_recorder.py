@@ -1186,23 +1186,46 @@ if __name__ == "__main__":
         logger.info("Listening for position updates via WebSocket...")
         logger.info("Press Ctrl+C to stop")
         
-        # Simple watchdog for recording state
+        # Watchdog - проверяет позиции и останавливает запись
+        no_position_counter = 0
+        
         async def watchdog():
+            nonlocal no_position_counter
             while True:
-                await asyncio.sleep(5)
-                # Используем sync requests для проверки
+                await asyncio.sleep(2)
+                
                 try:
-                    resp = http_requests.get(
-                        f"http://127.0.0.1:17845/api/connections/{active_connections[0]['Id']}/positions",
-                        timeout=2
-                    )
-                    if resp.status_code == 200:
-                        positions = resp.json().get("positions", [])
-                        has_positions = len(positions) > 0
+                    total_positions = 0
+                    for conn in active_connections:
+                        try:
+                            resp = http_requests.get(
+                                f"http://127.0.0.1:17845/api/connections/{conn['Id']}/positions",
+                                timeout=2
+                            )
+                            if resp.status_code == 200:
+                                positions = resp.json().get("positions", [])
+                                total_positions += len(positions)
+                        except:
+                            pass
+                    
+                    logger.info(f"🔍 Watchdog: positions={total_positions}, recording={recorder._recording_active}")
+                    
+                    if total_positions == 0 and recorder._recording_active:
+                        no_position_counter += 1
+                        logger.info(f"No positions ({no_position_counter}/3)")
                         
-                        if not has_positions and recorder._recording_active:
-                            logger.info("Watchdog: no positions, stopping recording")
+                        if no_position_counter >= 3:
+                            logger.warning("⚠️ No positions for 6+ seconds - STOP recording!")
+                            suffix = "_NOFill" if not recorder._had_position_opened else ""
+                            recorder._stop_recording_flow(
+                                "+".join(sorted(recorder._session_tickers)) or "unknown",
+                                "unknown", 0, suffix
+                            )
                             recorder._recording_active = False
+                            recorder._session_tickers.clear()
+                            no_position_counter = 0
+                    else:
+                        no_position_counter = 0
                 except:
                     pass
         
