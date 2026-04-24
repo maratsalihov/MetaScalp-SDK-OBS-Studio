@@ -1178,7 +1178,7 @@ if __name__ == "__main__":
         else:
             logger.info("No existing positions or orders found")
         
-logger.info("Listening for position updates via WebSocket...")
+        logger.info("Listening for position updates via WebSocket...")
         logger.info("Press Ctrl+C to stop")
         
         # Simple watchdog for recording state
