@@ -1143,28 +1143,31 @@ if __name__ == "__main__":
             socket.subscribe(conn_id)
             logger.info(f"Subscribed to position updates for {conn_name}")
         
-        # Быстрая проверка первой биржи (2 сек таймаут)
-        try:
-            conn_id = active_connections[0]["Id"]
-            pos_data = await asyncio.wait_for(
-                client.get_positions(conn_id),
-                timeout=2.0
-            )
-            positions = pos_data.get("positions", [])
-            for pos in positions:
-                ticker = pos.get("ticker", "")
-                if ticker:
-                    recorder._active_tickers.add(ticker)
-                    recorder._session_tickers.add(ticker)
-                    recorder._had_position_opened = True
-                    logger.info(f"Found existing position: {ticker}")
-            
-            if positions and not recorder._recording_active:
-                recorder._recording_active = True
-                recorder._recording_start_time = datetime.now()
-                recorder._start_recording_flow(ticker, "unknown")
-        except:
-            pass
+        # Быстрая проверка всех бирж (2 сек таймаут на каждую)
+        for conn in active_connections:
+            conn_id = conn["Id"]
+            conn_name = conn["Name"]
+            try:
+                pos_data = await asyncio.wait_for(
+                    client.get_positions(conn_id),
+                    timeout=2.0
+                )
+                positions = pos_data.get("positions", [])
+                for pos in positions:
+                    ticker = pos.get("ticker", "")
+                    if ticker:
+                        recorder._active_tickers.add(ticker)
+                        recorder._session_tickers.add(ticker)
+                        recorder._had_position_opened = True
+                        logger.info(f"Found existing position on {conn_name}: {ticker}")
+            except:
+                pass
+        
+        if recorder._active_tickers and not recorder._recording_active:
+            recorder._recording_active = True
+            recorder._recording_start_time = datetime.now()
+            tickers = "+".join(sorted(recorder._session_tickers))
+            recorder._start_recording_flow(tickers, "unknown")
         
         logger.info("Listening for position updates...")
         
