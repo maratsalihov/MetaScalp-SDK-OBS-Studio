@@ -1186,57 +1186,42 @@ if __name__ == "__main__":
         logger.info("Listening for position updates via WebSocket...")
         logger.info("Press Ctrl+C to stop")
         
-        # Watchdog - проверяет позиции и останавливает запись
-        no_position_counter = 0
+        logger.info("🔍 Checking for existing positions (one-time)...")
+        existing_found = False
         
-        async def watchdog():
-            nonlocal no_position_counter
-            while True:
-                await asyncio.sleep(2)
-                
-                try:
-                    total_positions = 0
-                    for conn in active_connections:
-                        try:
-                            resp = http_requests.get(
-                                f"http://127.0.0.1:17845/api/connections/{conn['Id']}/positions",
-                                timeout=2
-                            )
-                            if resp.status_code == 200:
-                                positions = resp.json().get("positions", [])
-                                total_positions += len(positions)
-                        except:
-                            pass
-                    
-                    logger.info(f"🔍 Watchdog: positions={total_positions}, recording={recorder._recording_active}")
-                    
-                    if total_positions == 0 and recorder._recording_active:
-                        no_position_counter += 1
-                        logger.info(f"No positions ({no_position_counter}/3)")
-                        
-                        if no_position_counter >= 3:
-                            logger.warning("⚠️ No positions for 6+ seconds - STOP recording!")
-                            suffix = "_NOFill" if not recorder._had_position_opened else ""
-                            recorder._stop_recording_flow(
-                                "+".join(sorted(recorder._session_tickers)) or "unknown",
-                                "unknown", 0, suffix
-                            )
-                            recorder._recording_active = False
-                            recorder._session_tickers.clear()
-                            no_position_counter = 0
-                    else:
-                        no_position_counter = 0
-                except:
-                    pass
+        for conn in active_connections:
+            try:
+                resp = http_requests.get(
+                    f"http://127.0.0.1:17845/api/connections/{conn['Id']}/positions",
+                    timeout=3
+                )
+                if resp.status_code == 200:
+                    positions = resp.json().get("positions", [])
+                    for pos in positions:
+                        ticker = pos.get("Ticker") or pos.get("ticker", "")
+                        if ticker:
+                            existing_found = True
+                            recorder._active_tickers.add(ticker)
+                            recorder._session_tickers.add(ticker)
+                            recorder._had_position_opened = True
+                            logger.info(f"📊 Found existing position: {ticker}")
+            except Exception as e:
+                logger.debug(f"Check error: {e}")
         
-        watchdog_task = asyncio.create_task(watchdog())
+        if existing_found and not recorder._recording_active:
+            tickers_str = "+".join(sorted(recorder._session_tickers))
+            logger.info(f"🎬 Starting recording for existing positions: {tickers_str}")
+            recorder._recording_active = True
+            recorder._recording_start_time = datetime.now()
+            recorder._start_recording_flow(tickers_str, "unknown")
+        
+        logger.info("Listening for position updates via WebSocket...")
+        logger.info("Press Ctrl+C to stop")
         
         try:
             await socket.listen_forever()
         finally:
-            watchdog_task.cancel()
-        
-        await client.close()
+            await client.close()
     
     try:
         asyncio.run(run_with_metascalp())
